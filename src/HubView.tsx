@@ -14,6 +14,7 @@ import {
   hubCloneRepoStream,
   hubDefaultRepoRoot,
   hubListRepos,
+  hubPruneMissingRepos,
   hubScanDirectory,
   hubSearch,
   hubSetFavorite,
@@ -157,8 +158,16 @@ export function HubView({
 
   const refresh = useCallback(async () => {
     setError(null);
+    setNotice(null);
     try {
       if (query.trim() === "") {
+        const pruned = await hubPruneMissingRepos();
+        if (pruned > 0) {
+          setNotice(
+            isZh ? `已清理 ${pruned} 个已不存在的仓库` : `Pruned ${pruned} missing repos`,
+          );
+        }
+
         const nextRoot = getEffectiveRepoRoot().trim();
         if (nextRoot.length > 0 && nextRoot !== lastScannedRepoRootRef.current && !busyRef.current) {
           setBusy(true);

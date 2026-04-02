@@ -349,6 +349,26 @@ fn hub_list_repos(state: tauri::State<'_, AppState>) -> Result<Vec<RepoRecord>, 
 }
 
 #[tauri::command]
+fn hub_prune_missing_repos(state: tauri::State<'_, AppState>) -> Result<u64, String> {
+    let db = state.db.lock().map_err(|e| e.to_string())?;
+    let repos = db.list_all().map_err(map_db_err)?;
+    let mut pruned: u64 = 0;
+    for r in repos {
+        // Repo root paths are stored as canonical absolute paths, so a simple exists() check is enough.
+        let p = PathBuf::from(&r.path);
+        if !p.exists() {
+            if db
+                .delete(r.id)
+                .map_err(map_db_err)?
+            {
+                pruned += 1;
+            }
+        }
+    }
+    Ok(pruned)
+}
+
+#[tauri::command]
 fn hub_search(state: tauri::State<'_, AppState>, query: String) -> Result<Vec<RepoRecord>, String> {
     let db = state.db.lock().map_err(|e| e.to_string())?;
     if query.trim().is_empty() {
@@ -575,12 +595,15 @@ fn hub_clone_repo_stream(
 fn kill_process_by_pid(pid: u32) {
     #[cfg(unix)]
     {
-        let _ = std::process::Command::new("kill").arg(pid.to_string()).output();
+        // SIGKILL guarantees `git clone` is stopped immediately.
+        let _ = std::process::Command::new("kill")
+            .args(["-9", &pid.to_string()])
+            .output();
     }
     #[cfg(windows)]
     {
         let _ = std::process::Command::new("taskkill")
-            .args(["/F", "/PID", &pid.to_string()])
+            .args(["/F", "/T", "/PID", &pid.to_string()])
             .output();
     }
 }
@@ -1394,6 +1417,7 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             hub_list_repos,
+            hub_prune_missing_repos,
             hub_search,
             hub_add_repo,
             hub_default_repo_root,

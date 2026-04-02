@@ -58,6 +58,10 @@ export async function hubListRepos(): Promise<RepoRecord[]> {
   return invoke("hub_list_repos");
 }
 
+export async function hubPruneMissingRepos(): Promise<number> {
+  return invoke("hub_prune_missing_repos");
+}
+
 export async function hubSearch(query: string): Promise<RepoRecord[]> {
   return invoke("hub_search", { query });
 }
