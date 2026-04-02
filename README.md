@@ -1,8 +1,8 @@
-# ProjectShelf
+# Deskvio
 
 [中文文档](./README.zh-CN.md)
 
-ProjectShelf is a local-first desktop app for managing personal Git repositories.
+Deskvio is a local-first desktop app for managing personal Git repositories.
 
 It gives you a simple way to browse code, inspect commits, review changes, and keep repository-level release backups without signing in, running a server, or depending on terminal workflows.
 
@@ -24,12 +24,12 @@ It gives you a simple way to browse code, inspect commits, review changes, and k
 
 ## Releases
 
-In ProjectShelf, Releases are designed as a local backup manager rather than a CI/CD publishing workflow.
+In Deskvio, Releases are designed as a local backup manager rather than a CI/CD publishing workflow.
 
 - Each repository can keep multiple releases
 - Each release can include metadata and multiple assets
-- Release metadata is stored in `.projectshelf/releases/releases.json`
-- Release files are stored in `.projectshelf/releases/assets/...`
+- Release metadata is stored in `.deskvio/releases/releases.json`
+- Release files are stored in `.deskvio/releases/assets/...`
 
 This is useful for keeping exported builds, deliverables, archives, or version-specific files next to the repository they belong to.
 

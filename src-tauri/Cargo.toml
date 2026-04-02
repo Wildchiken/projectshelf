@@ -1,12 +1,12 @@
 [package]
-name = "projectshelf"
+name = "deskvio"
 version = "1.0.0"
-description = "Portable offline Git repository hub"
+description = "Deskvio — local-first Git repository desktop app"
 authors = ["Wildchiken"]
 edition = "2021"
 
 [lib]
-name = "offline_git_hub_lib"
+name = "deskvio_lib"
 crate-type = ["staticlib", "cdylib", "rlib"]
 
 [build-dependencies]

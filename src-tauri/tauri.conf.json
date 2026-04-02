@@ -1,8 +1,8 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "ProjectShelf",
+  "productName": "Deskvio",
   "version": "1.0.0",
-  "identifier": "com.wildchiken.projectshelf",
+  "identifier": "com.wildchiken.deskvio",
   "build": {
     "beforeDevCommand": "npm run dev",
     "devUrl": "http://localhost:1420",
@@ -12,7 +12,7 @@
   "app": {
     "windows": [
       {
-        "title": "ProjectShelf",
+        "title": "Deskvio",
         "width": 1100,
         "height": 720
       }

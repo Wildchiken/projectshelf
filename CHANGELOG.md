@@ -11,7 +11,7 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ### Added
 - Repo-level Releases manager (create/edit/delete release metadata).
-- Multi-asset release import and local persistence in `.projectshelf/releases/`.
+- Multi-asset release import and local persistence in `.deskvio/releases/`.
 - Backend release guards: duplicate version validation and collision-safe asset import IDs.
 - Asset cleanup paths for release/asset deletion consistency.
 - Unsaved-change guard for Releases editing flow.

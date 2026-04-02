@@ -1,8 +1,8 @@
-# 项目夹（ProjectShelf）
+# 仓维（Deskvio）
 
 [English](./README.md)
 
-项目夹（ProjectShelf）是一个本地优先的 Git 桌面工具，用来管理你的个人项目仓库。
+仓维（Deskvio）是一个本地优先的 Git 桌面工具，用来管理你的个人项目仓库。
 
 它提供一个更直接的本地使用方式：不用登录，不用启动后端服务，也不用依赖终端命令，就可以查看仓库、浏览提交、检查改动，并维护仓库级 Releases 备份。
 
@@ -24,12 +24,12 @@
 
 ## Releases
 
-项目夹（ProjectShelf）中的 Releases 定位是本地备份管理，而不是 CI/CD 发布流程。
+仓维（Deskvio）中的 Releases 定位是本地备份管理，而不是 CI/CD 发布流程。
 
 - 一个仓库可以维护多个 releases
 - 每个 release 可以包含元数据和多个资产文件
-- 元数据保存在 `.projectshelf/releases/releases.json`
-- 文件保存在 `.projectshelf/releases/assets/...`
+- 元数据保存在 `.deskvio/releases/releases.json`
+- 文件保存在 `.deskvio/releases/assets/...`
 
 适合保存导出包、交付文件、压缩档案，或其他和某个版本对应的本地文件。
 

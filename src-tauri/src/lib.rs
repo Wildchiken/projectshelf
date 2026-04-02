@@ -80,7 +80,7 @@ fn sanitize_segment(input: &str) -> String {
 }
 
 fn repo_releases_meta_dir(repo_root: &Path) -> PathBuf {
-    repo_root.join(".projectshelf").join("releases")
+    repo_root.join(".deskvio").join("releases")
 }
 
 fn repo_releases_json_path(repo_root: &Path) -> PathBuf {
@@ -194,15 +194,15 @@ fn assert_unique_release_versions(entries: &[ReleaseEntry]) -> Result<(), String
     Ok(())
 }
 fn app_data_root() -> Result<PathBuf, String> {
-    directories::ProjectDirs::from("com", "wildchiken", "ProjectShelf")
-        .map(|p| p.data_local_dir().join("projectshelf"))
+    directories::ProjectDirs::from("com", "wildchiken", "Deskvio")
+        .map(|p| p.data_local_dir().join("deskvio"))
         .ok_or_else(|| "could not resolve application data directory".to_string())
 }
 
 fn legacy_app_data_roots() -> Vec<PathBuf> {
     let mut roots = Vec::new();
     let candidates = [
-        ("com", "wildchiken", "ProjectShelf", "offline-git-hub"),
+        ("com", "wildchiken", "ProjectShelf", "projectshelf"),
         ("com", "atlas", "OfflineGitHub", "offline-git-hub"),
     ];
     for (qualifier, organization, application, leaf) in candidates {

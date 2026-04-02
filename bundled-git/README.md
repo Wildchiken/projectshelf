@@ -1,13 +1,13 @@
 # 便携版 Git 可执行文件
 
-Offline Git Hub 默认使用系统 PATH 中的 `git`。若希望 **U 盘即插即用、不依赖本机已安装 Git**，请将官方 **Portable Git** 解压到应用同目录，或使用环境变量。
+Deskvio（仓维）默认使用系统 PATH 中的 `git`。若希望 **U 盘即插即用、不依赖本机已安装 Git**，请将官方 **Portable Git** 解压到应用同目录，或使用环境变量。
 
 ## 目录布局（与打包后的可执行文件同级）
 
 **macOS / Linux**
 
 ```text
-OfflineGitHub.app/   （或你的可执行文件所在目录）
+Deskvio.app/   （或你的可执行文件所在目录）
   portable-git/
     bin/
       git
@@ -17,7 +17,7 @@ OfflineGitHub.app/   （或你的可执行文件所在目录）
 **Windows**
 
 ```text
-offline-git-hub.exe
+Deskvio.exe
 portable-git/
   cmd/
     git.exe

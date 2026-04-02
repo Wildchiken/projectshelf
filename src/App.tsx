@@ -13,14 +13,14 @@ import { RepoView } from "./RepoView";
 import { SettingsPanel, type AppLocale } from "./SettingsPanel";
 import "./App.css";
 
-const THEME_KEY = "projectshelf-theme";
-const HUB_LAYOUT_KEY = "projectshelf-layout";
-const APP_LOCALE_KEY = "projectshelf-locale";
-const APP_MOTION_KEY = "projectshelf-motion-enabled";
-const APP_REPO_ROOT_KEY = "projectshelf-repo-root";
-const APP_REPO_ROOT_ONBOARDING_KEY = "projectshelf-repo-root-onboarding-v2";
-const APP_REPO_ROOT_MIGRATION_KEY = "projectshelf-repo-root-migration-v2";
-const APP_SIDEBAR_COLLAPSED_KEY = "projectshelf-sidebar-collapsed";
+const THEME_KEY = "deskvio-theme";
+const HUB_LAYOUT_KEY = "deskvio-layout";
+const APP_LOCALE_KEY = "deskvio-locale";
+const APP_MOTION_KEY = "deskvio-motion-enabled";
+const APP_REPO_ROOT_KEY = "deskvio-repo-root";
+const APP_REPO_ROOT_ONBOARDING_KEY = "deskvio-repo-root-onboarding-v2";
+const APP_REPO_ROOT_MIGRATION_KEY = "deskvio-repo-root-migration-v2";
+const APP_SIDEBAR_COLLAPSED_KEY = "deskvio-sidebar-collapsed";
 
 type Theme = "light" | "dark";
 type HubLayoutMode = "comfortable" | "compact";
@@ -320,7 +320,7 @@ function App() {
     <div className={`app-shell ${sidebarCollapsed ? "sidebar-collapsed" : ""}`}>
       <aside className="sidebar">
         <div className="sidebar-head">
-          <div className="brand">{sidebarCollapsed ? "PS" : "ProjectShelf"}</div>
+          <div className="brand">{sidebarCollapsed ? "DV" : "Deskvio"}</div>
           <button
             type="button"
             className="sidebar-toggle-btn"

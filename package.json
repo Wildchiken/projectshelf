@@ -1,5 +1,6 @@
 {
-  "name": "projectshelf",
+  "name": "deskvio",
+  "description": "Deskvio — local-first Git repository desktop app",
   "private": true,
   "version": "1.0.0",
   "author": "Wildchiken",
