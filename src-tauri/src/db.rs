@@ -1,7 +1,11 @@
+use crate::git::TreeEntry;
 use rusqlite::{params, Connection, OptionalExtension};
 use serde::Serialize;
 use std::path::Path;
 use std::sync::Mutex;
+
+const TREE_CACHE_MAX_ROWS: usize = 48;
+const TREE_CACHE_MAX_JSON_BYTES: usize = 12 * 1024 * 1024;
 
 pub struct Database {
     conn: Mutex<Connection>,
@@ -52,6 +56,22 @@ impl Database {
                 return Err(e);
             }
         }
+        conn.execute_batch(
+            r#"
+            CREATE TABLE IF NOT EXISTS repo_tree_cache (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                repo_id INTEGER NOT NULL,
+                rev_key TEXT NOT NULL,
+                resolved_rev TEXT NOT NULL,
+                paths_json TEXT NOT NULL,
+                byte_len INTEGER NOT NULL,
+                updated_at INTEGER NOT NULL,
+                UNIQUE(repo_id, rev_key),
+                FOREIGN KEY (repo_id) REFERENCES repos(id) ON DELETE CASCADE
+            );
+            CREATE INDEX IF NOT EXISTS idx_repo_tree_cache_updated ON repo_tree_cache(updated_at);
+            "#,
+        )?;
         Ok(Self {
             conn: Mutex::new(conn),
         })
@@ -184,6 +204,85 @@ impl Database {
         Ok(())
     }
 
+    pub fn tree_cache_get_if_current(
+        &self,
+        repo_id: i64,
+        rev_key: &str,
+        current_resolved: &str,
+    ) -> Result<Option<Vec<TreeEntry>>, rusqlite::Error> {
+        let conn = self.conn.lock().expect("db mutex poisoned");
+        let row: Option<(String, String)> = conn
+            .query_row(
+                "SELECT resolved_rev, paths_json FROM repo_tree_cache WHERE repo_id = ?1 AND rev_key = ?2",
+                params![repo_id, rev_key],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .optional()?;
+        let Some((cached_rev, json)) = row else {
+            return Ok(None);
+        };
+        if cached_rev != current_resolved {
+            return Ok(None);
+        }
+        match serde_json::from_str(&json) {
+            Ok(v) => Ok(Some(v)),
+            Err(_) => Ok(None),
+        }
+    }
+
+    pub fn tree_cache_put(
+        &self,
+        repo_id: i64,
+        rev_key: &str,
+        resolved_rev: &str,
+        entries: &[TreeEntry],
+    ) -> Result<(), rusqlite::Error> {
+        let Ok(json) = serde_json::to_string(entries) else {
+            return Ok(());
+        };
+        if json.len() > TREE_CACHE_MAX_JSON_BYTES {
+            return Ok(());
+        }
+        let byte_len = json.len() as i64;
+        let now = now_unix();
+        let conn = self.conn.lock().expect("db mutex poisoned");
+        conn.execute(
+            "INSERT INTO repo_tree_cache (repo_id, rev_key, resolved_rev, paths_json, byte_len, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+             ON CONFLICT(repo_id, rev_key) DO UPDATE SET
+               resolved_rev = excluded.resolved_rev,
+               paths_json = excluded.paths_json,
+               byte_len = excluded.byte_len,
+               updated_at = excluded.updated_at",
+            params![repo_id, rev_key, resolved_rev, json, byte_len, now],
+        )?;
+        tree_cache_prune(&conn, TREE_CACHE_MAX_ROWS)?;
+        Ok(())
+    }
+
+    pub fn tree_cache_invalidate_repo(&self, repo_id: i64) -> Result<(), rusqlite::Error> {
+        let conn = self.conn.lock().expect("db mutex poisoned");
+        conn.execute(
+            "DELETE FROM repo_tree_cache WHERE repo_id = ?1",
+            params![repo_id],
+        )?;
+        Ok(())
+    }
+}
+
+fn tree_cache_prune(conn: &Connection, max_rows: usize) -> Result<(), rusqlite::Error> {
+    let n: i64 = conn.query_row("SELECT COUNT(*) FROM repo_tree_cache", [], |row| row.get(0))?;
+    let excess = n as i64 - max_rows as i64;
+    if excess <= 0 {
+        return Ok(());
+    }
+    conn.execute(
+        "DELETE FROM repo_tree_cache WHERE id IN (
+            SELECT id FROM repo_tree_cache ORDER BY updated_at ASC LIMIT ?1
+        )",
+        params![excess],
+    )?;
+    Ok(())
 }
 
 fn now_unix() -> i64 {

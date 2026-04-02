@@ -3,11 +3,12 @@ mod git;
 
 use base64::Engine;
 use db::{Database, RepoRecord};
-use tauri::Manager;
+use tauri::{Emitter, Manager};
 use git::{
-    clone_repo, discover_repos_under, head_sha, latest_commit_at, list_refs, list_remotes,
-    log_oneline_for_rev, last_commit_for_path, resolve_git_binary, resolve_repo, rev_list_count, show_blob,
-    show_commit_patch, CommitSummary, GitError, RefLists, RemoteInfo, StatusLine, TreeEntry,
+    clone_repo, discover_repos_under, head_sha, latest_commit_at, last_commits_for_paths,
+    last_commit_for_path, list_refs, list_remotes, log_oneline_for_rev, resolve_git_binary,
+    resolve_repo, rev_list_count, rev_parse_verify, show_blob, show_commit_patch, CommitSummary,
+    GitError, RefLists, RemoteInfo, StatusLine, TreeEntry,
 };
 use serde::{Deserialize, Serialize};
 use std::fs;
@@ -245,9 +246,8 @@ fn legacy_repo_root() -> Result<PathBuf, String> {
 }
 
 fn visible_repo_root_candidate() -> Option<PathBuf> {
-    std::env::current_dir()
-        .ok()
-        .map(|cwd| cwd.join("repositories"))
+    directories::BaseDirs::new()
+        .map(|b| b.home_dir().join("Deskvio"))
 }
 
 fn ensure_writable_dir(path: &Path) -> Result<(), String> {
@@ -300,6 +300,7 @@ fn is_allowed_delete_path(path: &Path) -> bool {
 pub struct AppState {
     db: Mutex<Database>,
     git_bin: PathBuf,
+    clone_pids: Mutex<std::collections::HashMap<String, u32>>,
 }
 
 fn map_git_err(e: GitError) -> String {
@@ -441,6 +442,159 @@ fn hub_clone_repo(
         head,
     )
     .map_err(map_db_err)
+}
+
+fn compute_clone_dest(url: &str, dest_parent: Option<String>) -> Result<PathBuf, String> {
+    let base = if let Some(dest) = dest_parent {
+        let p = PathBuf::from(dest.trim());
+        if p.as_os_str().is_empty() { default_repo_root()? } else { p }
+    } else {
+        default_repo_root()?
+    };
+    fs::create_dir_all(&base).map_err(|e| e.to_string())?;
+    let mut name = url.rsplit('/').next().unwrap_or("repo").trim().trim_end_matches(".git").to_string();
+    if name.is_empty() { name = "repo".to_string(); }
+    let mut target = base.join(&name);
+    let mut idx = 2usize;
+    while target.exists() {
+        target = base.join(format!("{}-{}", name, idx));
+        idx += 1;
+    }
+    Ok(target)
+}
+
+#[tauri::command]
+fn hub_clone_repo_stream(
+    state: tauri::State<'_, AppState>,
+    app: tauri::AppHandle,
+    url: String,
+    dest_parent: Option<String>,
+) -> Result<String, String> {
+    let url = url.trim().to_string();
+    if !url.starts_with("https://") {
+        return Err("only public https clone URLs are supported".into());
+    }
+    let target = compute_clone_dest(&url, dest_parent)?;
+    let git_bin = state.git_bin.clone();
+    let session_id = Uuid::new_v4().simple().to_string();
+
+    let child = std::process::Command::new(&git_bin)
+        .args(["clone", "--progress", "--", &url, &target.to_string_lossy()])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .map_err(|e| format!("failed to spawn git: {}", e))?;
+
+    let pid = child.id();
+    {
+        let mut pids = state.clone_pids.lock().map_err(|e| e.to_string())?;
+        pids.insert(session_id.clone(), pid);
+    }
+
+    let sid = session_id.clone();
+    std::thread::spawn(move || {
+        use std::io::Read;
+        let mut child = child;
+        if let Some(stderr) = child.stderr.take() {
+            let mut reader = std::io::BufReader::new(stderr);
+            let mut buf = [0u8; 4096];
+            let mut line_buf = Vec::new();
+            loop {
+                match reader.read(&mut buf) {
+                    Ok(0) => break,
+                    Ok(n) => {
+                        for &b in &buf[..n] {
+                            if b == b'\r' || b == b'\n' {
+                                if !line_buf.is_empty() {
+                                    let line = String::from_utf8_lossy(&line_buf).to_string();
+                                    let _ = app.emit("clone-progress", serde_json::json!({
+                                        "sessionId": &sid,
+                                        "line": line,
+                                    }));
+                                    line_buf.clear();
+                                }
+                            } else {
+                                line_buf.push(b);
+                            }
+                        }
+                    }
+                    Err(_) => break,
+                }
+            }
+            if !line_buf.is_empty() {
+                let line = String::from_utf8_lossy(&line_buf).to_string();
+                let _ = app.emit("clone-progress", serde_json::json!({
+                    "sessionId": &sid,
+                    "line": line,
+                }));
+            }
+        }
+        let status = child.wait();
+        if let Ok(mut pids) = app.state::<AppState>().clone_pids.lock() {
+            pids.remove(&sid);
+        }
+        match status {
+            Ok(s) if s.success() => {
+                let reg = (|| -> Result<RepoRecord, String> {
+                    let st = app.state::<AppState>();
+                    let canon = target.canonicalize().map_err(|e| e.to_string())?;
+                    let ctx = resolve_repo(&st.git_bin, &canon).map_err(map_git_err)?;
+                    let head = head_sha(&st.git_bin, &ctx).ok();
+                    let display_name = canon.file_name().map(|s| s.to_string_lossy().to_string());
+                    let db = st.db.lock().map_err(|e| e.to_string())?;
+                    db.insert_repo(&canon.to_string_lossy(), display_name, ctx.bare, head)
+                        .map_err(map_db_err)
+                })();
+                let _ = app.emit("clone-done", serde_json::json!({
+                    "sessionId": &sid,
+                    "ok": true,
+                    "error": null,
+                }));
+                let _ = reg;
+            }
+            Ok(s) => {
+                let _ = app.emit("clone-done", serde_json::json!({
+                    "sessionId": &sid,
+                    "ok": false,
+                    "error": format!("git clone exited with {}", s),
+                }));
+            }
+            Err(e) => {
+                let _ = app.emit("clone-done", serde_json::json!({
+                    "sessionId": &sid,
+                    "ok": false,
+                    "error": e.to_string(),
+                }));
+            }
+        }
+    });
+
+    Ok(session_id)
+}
+
+fn kill_process_by_pid(pid: u32) {
+    #[cfg(unix)]
+    {
+        let _ = std::process::Command::new("kill").arg(pid.to_string()).output();
+    }
+    #[cfg(windows)]
+    {
+        let _ = std::process::Command::new("taskkill")
+            .args(["/F", "/PID", &pid.to_string()])
+            .output();
+    }
+}
+
+#[tauri::command]
+fn hub_cancel_clone(
+    state: tauri::State<'_, AppState>,
+    session_id: String,
+) -> Result<(), String> {
+    let mut pids = state.clone_pids.lock().map_err(|e| e.to_string())?;
+    if let Some(pid) = pids.remove(&session_id) {
+        kill_process_by_pid(pid);
+    }
+    Ok(())
 }
 
 #[tauri::command]
@@ -712,12 +866,8 @@ fn repo_delete_release_asset(
     Ok(())
 }
 
-#[tauri::command]
-fn repo_ls_tree(
-    state: tauri::State<'_, AppState>,
-    id: i64,
-    rev: Option<String>,
-) -> Result<Vec<TreeEntry>, String> {
+fn repo_ls_tree_impl(state: &AppState, id: i64, rev: Option<String>) -> Result<Vec<TreeEntry>, String> {
+    let treeish = rev.unwrap_or_else(|| "HEAD".into());
     let db = state.db.lock().map_err(|e| e.to_string())?;
     let r = db
         .get(id)
@@ -725,8 +875,40 @@ fn repo_ls_tree(
         .ok_or_else(|| "repository not found".to_string())?;
     drop(db);
     let ctx = load_ctx(&state.git_bin, &r.path)?;
-    let treeish = rev.unwrap_or_else(|| "HEAD".into());
-    git::ls_tree(&state.git_bin, &ctx, &treeish).map_err(map_git_err)
+    let current = rev_parse_verify(&state.git_bin, &ctx, &treeish).map_err(map_git_err)?;
+    let db = state.db.lock().map_err(|e| e.to_string())?;
+    if let Some(entries) = db
+        .tree_cache_get_if_current(id, &treeish, &current)
+        .map_err(map_db_err)?
+    {
+        drop(db);
+        return Ok(entries);
+    }
+    drop(db);
+    let entries = git::ls_tree(&state.git_bin, &ctx, &treeish).map_err(map_git_err)?;
+    let db = state.db.lock().map_err(|e| e.to_string())?;
+    let _ = db.tree_cache_put(id, &treeish, &current, &entries);
+    drop(db);
+    Ok(entries)
+}
+
+#[tauri::command]
+fn repo_ls_tree(
+    state: tauri::State<'_, AppState>,
+    id: i64,
+    rev: Option<String>,
+) -> Result<Vec<TreeEntry>, String> {
+    repo_ls_tree_impl(&state, id, rev)
+}
+
+#[tauri::command]
+fn repo_warm_tree_cache(
+    state: tauri::State<'_, AppState>,
+    id: i64,
+    rev: Option<String>,
+) -> Result<(), String> {
+    let _ = repo_ls_tree_impl(&state, id, rev)?;
+    Ok(())
 }
 
 #[tauri::command]
@@ -829,16 +1011,16 @@ fn repo_paths_last_commit(
     drop(db);
     let ctx = load_ctx(&state.git_bin, &r.path)?;
     let rev = rev.trim().to_string();
-    let mut out = Vec::with_capacity(paths.len());
-    for path in paths {
-        let p = path.trim().to_string();
-        if p.is_empty() {
-            continue;
-        }
-        let commit = last_commit_for_path(&state.git_bin, &ctx, &rev, &p).map_err(map_git_err)?;
-        out.push(RepoPathCommit { path: p, commit });
-    }
-    Ok(out)
+    let paths: Vec<String> = paths
+        .into_iter()
+        .map(|p| p.trim().to_string())
+        .filter(|p| !p.is_empty())
+        .collect();
+    let pairs = last_commits_for_paths(&state.git_bin, &ctx, &rev, &paths).map_err(map_git_err)?;
+    Ok(pairs
+        .into_iter()
+        .map(|(path, commit)| RepoPathCommit { path, commit })
+        .collect())
 }
 
 #[tauri::command]
@@ -952,6 +1134,7 @@ fn repo_commit(
     if let Ok(h) = head_sha(&state.git_bin, &ctx) {
         let db = state.db.lock().map_err(|e| e.to_string())?;
         let _ = db.update_cached_head(id, Some(&h));
+        let _ = db.tree_cache_invalidate_repo(id);
     }
     Ok(out)
 }
@@ -1205,6 +1388,7 @@ pub fn run() {
             app.manage(AppState {
                 db: Mutex::new(db),
                 git_bin,
+                clone_pids: Mutex::new(std::collections::HashMap::new()),
             });
             Ok(())
         })
@@ -1215,6 +1399,8 @@ pub fn run() {
             hub_default_repo_root,
             hub_legacy_repo_root,
             hub_clone_repo,
+            hub_clone_repo_stream,
+            hub_cancel_clone,
             hub_remove_repo,
             hub_unlink_repo,
             hub_scan_directory,
@@ -1225,6 +1411,7 @@ pub fn run() {
             hub_touch_repo,
             hub_refresh_heads,
             repo_ls_tree,
+            repo_warm_tree_cache,
             repo_log,
             repo_list_refs,
             repo_latest_commit,

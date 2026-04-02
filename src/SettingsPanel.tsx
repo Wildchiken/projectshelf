@@ -1,4 +1,5 @@
 import { useEffect, useId, useRef, useState } from "react";
+import { open as openDialog } from "@tauri-apps/plugin-dialog";
 
 type Theme = "light" | "dark";
 type HubLayoutMode = "comfortable" | "compact";
@@ -73,6 +74,7 @@ const TEXT = {
     repoRootHint: "新导入/克隆默认落到此目录。",
     repoRootPlaceholder: "默认仓库根目录",
     restoreDefaultRoot: "恢复默认目录",
+    browse: "浏览…",
   },
   "en-US": {
     title: "Settings",
@@ -113,6 +115,7 @@ const TEXT = {
     repoRootHint: "New imports and clones will be created under this directory.",
     repoRootPlaceholder: "Default repository root",
     restoreDefaultRoot: "Restore default directory",
+    browse: "Browse...",
   },
 } as const;
 
@@ -301,14 +304,30 @@ export function SettingsPanel({
         <section className="settings-card">
           <h3>{t.repoRoot}</h3>
           <p className="settings-note">{t.repoRootHint}</p>
-          <input
-            type="text"
-            className="settings-delete-gate-input"
-            value={repoRoot}
-            placeholder={t.repoRootPlaceholder}
-            aria-label={t.repoRoot}
-            onChange={(e) => onRepoRootChange(e.target.value)}
-          />
+          <div className="settings-repo-root-row">
+            <input
+              type="text"
+              className="settings-delete-gate-input"
+              value={repoRoot}
+              placeholder={t.repoRootPlaceholder}
+              aria-label={t.repoRoot}
+              onChange={(e) => onRepoRootChange(e.target.value)}
+            />
+            <button
+              type="button"
+              className="btn-secondary"
+              onClick={async () => {
+                const dir = await openDialog({
+                  directory: true,
+                  multiple: false,
+                  defaultPath: repoRoot || undefined,
+                });
+                if (typeof dir === "string") onRepoRootChange(dir);
+              }}
+            >
+              {t.browse}
+            </button>
+          </div>
           <div className="settings-confirm-actions">
             <button type="button" className="btn-secondary" onClick={onResetRepoRoot}>
               {t.restoreDefaultRoot}

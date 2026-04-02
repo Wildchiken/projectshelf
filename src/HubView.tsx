@@ -10,7 +10,9 @@ import {
 import type { RepoRecord } from "./api";
 import {
   hubAddRepo,
-  hubCloneRepo,
+  hubCancelClone,
+  hubCloneRepoStream,
+  hubDefaultRepoRoot,
   hubListRepos,
   hubScanDirectory,
   hubSearch,
@@ -18,6 +20,9 @@ import {
   hubTouchRepo,
   hubRefreshHeads,
   importZip,
+  repoWarmTreeCache,
+  onCloneDone,
+  onCloneProgress,
 } from "./api";
 
 type Props = {
@@ -47,6 +52,11 @@ export function HubView({
   const [favoritesOnly, setFavoritesOnly] = useState(false);
   const [cloneOpen, setCloneOpen] = useState(false);
   const [cloneUrl, setCloneUrl] = useState("");
+  const [cloneSessionId, setCloneSessionId] = useState<string | null>(null);
+  const [cloneLog, setCloneLog] = useState<string[]>([]);
+  const [cloneResult, setCloneResult] = useState<{ ok: boolean; error?: string } | null>(null);
+  const [resolvedDefaultRoot, setResolvedDefaultRoot] = useState("");
+  const cloneLogRef = useRef<HTMLPreElement>(null);
   const moreRef = useRef<HTMLDivElement>(null);
   const listRef = useRef<HTMLUListElement>(null);
   const [effectiveColumns, setEffectiveColumns] = useState<number>(1);
@@ -117,6 +127,10 @@ export function HubView({
   }, [repos, favoritesOnly, sortMode]);
 
   useEffect(() => {
+    void hubDefaultRepoRoot().then(setResolvedDefaultRoot).catch(() => {});
+  }, []);
+
+  useEffect(() => {
     if (!moreOpen) return;
     const close = (e: MouseEvent) => {
       if (moreRef.current && !moreRef.current.contains(e.target as Node)) {
@@ -143,6 +157,77 @@ export function HubView({
   useEffect(() => {
     void refresh();
   }, [refresh, refreshToken]);
+
+  useEffect(() => {
+    if (query.trim() !== "") return;
+    const candidates = [...repos]
+      .filter((r) => r.lastOpenedAt != null || r.isFavorite)
+      .sort((a, b) => {
+        if (a.isFavorite !== b.isFavorite) return a.isFavorite ? -1 : 1;
+        return (b.lastOpenedAt ?? 0) - (a.lastOpenedAt ?? 0);
+      })
+      .slice(0, 4)
+      .map((r) => r.id);
+    if (candidates.length === 0) return;
+    let cancelled = false;
+    let idleId: number | null = null;
+    let timeoutId: ReturnType<typeof setTimeout> | null = null;
+    const run = () => {
+      if (cancelled) return;
+      for (const rid of candidates) {
+        void repoWarmTreeCache(rid, "HEAD").catch(() => {});
+      }
+    };
+    if (typeof window.requestIdleCallback === "function") {
+      idleId = window.requestIdleCallback(run);
+    } else {
+      timeoutId = window.setTimeout(run, 400);
+    }
+    return () => {
+      cancelled = true;
+      if (idleId != null && typeof window.cancelIdleCallback === "function") {
+        window.cancelIdleCallback(idleId);
+      }
+      if (timeoutId != null) window.clearTimeout(timeoutId);
+    };
+  }, [repos, query, refreshToken]);
+
+  useEffect(() => {
+    if (!cloneSessionId) return;
+    const unlistens: Promise<() => void>[] = [];
+    unlistens.push(
+      onCloneProgress((p) => {
+        if (p.sessionId !== cloneSessionId) return;
+        setCloneLog((prev) => {
+          const next = [...prev, p.line];
+          return next.length > 200 ? next.slice(-200) : next;
+        });
+        requestAnimationFrame(() => {
+          cloneLogRef.current?.scrollTo(0, cloneLogRef.current.scrollHeight);
+        });
+      }),
+    );
+    unlistens.push(
+      onCloneDone((p) => {
+        if (p.sessionId !== cloneSessionId) return;
+        setCloneResult({ ok: p.ok, error: p.error ?? undefined });
+        setBusy(false);
+        if (p.ok) {
+          void refresh();
+          setTimeout(() => {
+            setCloneOpen(false);
+            setCloneUrl("");
+            setCloneLog([]);
+            setCloneResult(null);
+            setCloneSessionId(null);
+          }, 1500);
+        }
+      }),
+    );
+    return () => {
+      for (const u of unlistens) void u.then((fn) => fn());
+    };
+  }, [cloneSessionId, refresh]);
 
   useEffect(() => {
     const listEl = listRef.current;
@@ -174,7 +259,7 @@ export function HubView({
 
   async function pickAddRepo() {
     setError(null);
-    const dir = await open({ directory: true, multiple: false });
+    const dir = await open({ directory: true, multiple: false, defaultPath: repoRoot || resolvedDefaultRoot || undefined });
     if (dir === null || Array.isArray(dir)) return;
     setBusy(true);
     try {
@@ -189,7 +274,7 @@ export function HubView({
 
   async function pickScan() {
     setError(null);
-    const dir = await open({ directory: true, multiple: false });
+    const dir = await open({ directory: true, multiple: false, defaultPath: repoRoot || resolvedDefaultRoot || undefined });
     if (dir === null || Array.isArray(dir)) return;
     setBusy(true);
     try {
@@ -241,17 +326,26 @@ export function HubView({
     const url = cloneUrl.trim();
     if (!url) return;
     setError(null);
+    setCloneLog([]);
+    setCloneResult(null);
     setBusy(true);
     try {
-      await hubCloneRepo(url, repoRoot || null);
-      setCloneOpen(false);
-      setCloneUrl("");
-      await refresh();
+      const sid = await hubCloneRepoStream(url, repoRoot || null);
+      setCloneSessionId(sid);
     } catch (e) {
       setError(String(e));
-    } finally {
       setBusy(false);
     }
+  }
+
+  async function cancelClone() {
+    if (cloneSessionId) {
+      await hubCancelClone(cloneSessionId);
+    }
+    setBusy(false);
+    setCloneSessionId(null);
+    setCloneLog([]);
+    setCloneResult(null);
   }
 
   async function toggleFavorite(r: RepoRecord) {
@@ -319,6 +413,14 @@ export function HubView({
           >
             {isZh ? "添加仓库" : "Add Repo"}
           </button>
+          <button
+            type="button"
+            className="btn-secondary"
+            onClick={() => setCloneOpen(true)}
+            disabled={busy}
+          >
+            {isZh ? "远程克隆" : "Clone"}
+          </button>
           <div className="hub-more">
             <button
               type="button"
@@ -343,17 +445,6 @@ export function HubView({
                   }}
                 >
                   {isZh ? "扫描目录并添加…" : "Scan and add from folder..."}
-                </button>
-                <button
-                  type="button"
-                  role="menuitem"
-                  disabled={busy}
-                  onClick={() => {
-                    setMoreOpen(false);
-                    setCloneOpen(true);
-                  }}
-                >
-                  {isZh ? "远程克隆…" : "Clone from remote..."}
                 </button>
                 <button
                   type="button"
@@ -415,24 +506,45 @@ export function HubView({
             placeholder="https://github.com/owner/repo.git"
             value={cloneUrl}
             onChange={(e) => setCloneUrl(e.target.value)}
+            disabled={busy}
           />
           <p className="settings-note">
             {isZh ? "落地目录：" : "Destination root: "}
-            <code>{repoRoot || (isZh ? "未设置" : "Not set")}</code>
+            <code>{repoRoot || resolvedDefaultRoot || (isZh ? "默认" : "default")}</code>
           </p>
+          {cloneLog.length > 0 && (
+            <pre ref={cloneLogRef} className="hub-clone-log">{cloneLog.join("\n")}</pre>
+          )}
+          {cloneResult && !cloneResult.ok && (
+            <div className="error-banner">{cloneResult.error}</div>
+          )}
+          {cloneResult?.ok && (
+            <div className="info-banner">{isZh ? "克隆完成" : "Clone complete"}</div>
+          )}
           <div className="settings-confirm-actions">
-            <button
-              type="button"
-              className="btn-secondary"
-              onClick={() => {
-                if (busy) return;
-                setCloneOpen(false);
-                setCloneUrl("");
-              }}
-              disabled={busy}
-            >
-              {isZh ? "取消" : "Cancel"}
-            </button>
+            {busy ? (
+              <button
+                type="button"
+                className="btn-secondary"
+                onClick={() => void cancelClone()}
+              >
+                {isZh ? "取消克隆" : "Cancel clone"}
+              </button>
+            ) : (
+              <button
+                type="button"
+                className="btn-secondary"
+                onClick={() => {
+                  setCloneOpen(false);
+                  setCloneUrl("");
+                  setCloneLog([]);
+                  setCloneResult(null);
+                  setCloneSessionId(null);
+                }}
+              >
+                {isZh ? "关闭" : "Close"}
+              </button>
+            )}
             <button
               type="button"
               className="btn-primary"
@@ -506,15 +618,72 @@ export function HubView({
         ))}
       </ul>
       {displayedRepos.length === 0 && !error && (
-        <p className="empty-hint">
-          {isZh
-            ? favoritesOnly
-              ? "没有符合条件的收藏仓库。"
-              : "暂无仓库。添加或扫描一个备份目录开始。"
-            : favoritesOnly
-              ? "No matching favorite repositories."
-              : "No repositories yet. Add one or scan a backup directory to start."}
-        </p>
+        favoritesOnly ? (
+          <p className="empty-hint">
+            {isZh ? "没有符合条件的收藏仓库。" : "No matching favorite repositories."}
+          </p>
+        ) : (
+          <div className="hub-onboarding">
+            <h3 className="hub-onboarding-title">
+              {isZh ? "开始使用 Deskvio" : "Get started with Deskvio"}
+            </h3>
+            <p className="hub-onboarding-desc">
+              {isZh
+                ? "选择一种方式添加你的第一个 Git 仓库："
+                : "Choose a way to add your first Git repository:"}
+            </p>
+            <div className="hub-onboarding-cards">
+              <button
+                type="button"
+                className="hub-onboarding-card hub-onboarding-card-primary"
+                disabled={busy}
+                onClick={() => setCloneOpen(true)}
+              >
+                <span className="hub-onboarding-card-icon" aria-hidden>↓</span>
+                <span className="hub-onboarding-card-title">
+                  {isZh ? "克隆远程仓库" : "Clone a remote repo"}
+                </span>
+                <span className="hub-onboarding-card-desc">
+                  {isZh
+                    ? "输入 GitHub 等公开仓库的 HTTPS 链接，自动下载到本地。"
+                    : "Paste an HTTPS URL from GitHub or other hosts to download a repo locally."}
+                </span>
+              </button>
+              <button
+                type="button"
+                className="hub-onboarding-card"
+                disabled={busy}
+                onClick={() => void pickAddRepo()}
+              >
+                <span className="hub-onboarding-card-icon" aria-hidden>+</span>
+                <span className="hub-onboarding-card-title">
+                  {isZh ? "添加本地仓库" : "Add a local repo"}
+                </span>
+                <span className="hub-onboarding-card-desc">
+                  {isZh
+                    ? "选择电脑上已有的 Git 仓库文件夹。"
+                    : "Select an existing Git repository folder on your computer."}
+                </span>
+              </button>
+              <button
+                type="button"
+                className="hub-onboarding-card"
+                disabled={busy}
+                onClick={() => void pickScan()}
+              >
+                <span className="hub-onboarding-card-icon" aria-hidden>⊕</span>
+                <span className="hub-onboarding-card-title">
+                  {isZh ? "扫描目录" : "Scan a directory"}
+                </span>
+                <span className="hub-onboarding-card-desc">
+                  {isZh
+                    ? "选择一个根目录，自动发现其中的所有 Git 仓库。"
+                    : "Select a root folder to automatically discover all Git repos within it."}
+                </span>
+              </button>
+            </div>
+          </div>
+        )
       )}
     </div>
   );

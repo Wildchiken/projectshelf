@@ -50,6 +50,17 @@
   --radius-lg: 12px;
   --focus-ring: rgba(17, 17, 17, 0.28);
   --card-shadow-hover: 0 8px 20px rgba(15, 23, 42, 0.08);
+
+  --md-fg: #1a1a1a;
+  --md-link: #0969da;
+  --md-border: #d0d7de;
+  --md-blockquote-fg: #636c76;
+  --md-code-bg: #eff1f3;
+  --md-pre-bg: #f6f8fa;
+  --md-pre-border: #d0d7de;
+  --md-th-bg: #f6f8fa;
+  --md-hr: #d0d7de;
+  --md-line-num: #b0b7bf;
 }
 
 html[data-theme="dark"] {
@@ -83,6 +94,17 @@ html[data-theme="dark"] {
   --primary-btn-hover-bg: #e5e7eb;
   --focus-ring: rgba(245, 245, 245, 0.28);
   --card-shadow-hover: 0 10px 22px rgba(0, 0, 0, 0.28);
+
+  --md-fg: #e6edf3;
+  --md-link: #58a6ff;
+  --md-border: #30363d;
+  --md-blockquote-fg: #8b949e;
+  --md-code-bg: rgba(110, 118, 129, 0.25);
+  --md-pre-bg: #161b22;
+  --md-pre-border: #30363d;
+  --md-th-bg: #161b22;
+  --md-hr: #30363d;
+  --md-line-num: #6e7681;
 }
 
 .sr-only {
@@ -419,6 +441,76 @@ body {
 .main > * {
   max-width: 1600px;
   margin-inline: auto;
+}
+
+/* Immersive markdown reader: hide app chrome (set from RepoView) */
+/*
+ * 仅锁 .main 不够：.app-shell 只有 min-height:100vh、子项 min-height:auto 时，
+ * 壳会随内容无限变高，滚动落在 document 上，顶栏和正文一起被卷走，viewport scrollTop 也对不齐。
+ */
+html[data-repo-reader="1"] {
+  height: 100vh;
+  height: 100dvh;
+  overflow: hidden;
+}
+
+html[data-repo-reader="1"] body,
+html[data-repo-reader="1"] #root {
+  min-height: 0;
+  height: 100%;
+  overflow: hidden;
+}
+
+html[data-repo-reader="1"] #root {
+  display: flex;
+  flex-direction: column;
+}
+
+html[data-repo-reader="1"] .app-shell {
+  flex: 1;
+  min-height: 0;
+  overflow: hidden;
+}
+
+html[data-repo-reader="1"] .app-shell .sidebar {
+  display: none;
+}
+
+html[data-repo-reader="1"] .app-shell .main {
+  padding: 0;
+  /* 禁止整页滚动：阅读模式只让 .repo-ios-viewport 滚，与分栏时一致，scroll 恢复才能对上 */
+  overflow: hidden;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+html[data-repo-reader="1"] .app-shell .main > * {
+  max-width: none;
+  margin-inline: 0;
+}
+
+html[data-repo-reader="1"] .app-shell .main > .error-banner,
+html[data-repo-reader="1"] .app-shell .main > .info-banner {
+  flex-shrink: 0;
+}
+
+html[data-repo-reader="1"] .app-shell .main > .screen-panel {
+  flex: 1;
+  min-height: 0;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+html[data-repo-reader="1"] .app-shell .main .screen-panel > .repo-view.repo-view-ios {
+  flex: 1;
+  min-height: 0;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
 }
 
 .screen-panel {
@@ -1401,7 +1493,7 @@ button.danger {
 .markdown-body {
   font-size: 0.92rem;
   line-height: 1.6;
-  color: #e6edf3;
+  color: var(--md-fg);
 }
 
 .markdown-body h1,
@@ -1411,7 +1503,7 @@ button.danger {
   margin-bottom: 0.65rem;
   font-weight: 600;
   line-height: 1.3;
-  border-bottom: 1px solid #21262d;
+  border-bottom: 1px solid var(--md-border);
   padding-bottom: 0.35rem;
 }
 
@@ -1433,7 +1525,7 @@ button.danger {
 }
 
 .markdown-body a {
-  color: #58a6ff;
+  color: var(--md-link);
   text-decoration: none;
 }
 
@@ -1480,12 +1572,12 @@ button.md-internal-link:hover {
 .markdown-body blockquote {
   margin: 0.65rem 0;
   padding: 0 0.85rem;
-  border-left: 4px solid #30363d;
-  color: #8b949e;
+  border-left: 4px solid var(--md-border);
+  color: var(--md-blockquote-fg);
 }
 
 .markdown-body code {
-  background: rgba(110, 118, 129, 0.25);
+  background: var(--md-code-bg);
   padding: 0.15em 0.4em;
   border-radius: 4px;
   font-size: 0.88em;
@@ -1493,8 +1585,8 @@ button.md-internal-link:hover {
 }
 
 .markdown-body pre {
-  background: #161b22;
-  border: 1px solid #30363d;
+  background: var(--md-pre-bg);
+  border: 1px solid var(--md-pre-border);
   border-radius: 6px;
   padding: 0.75rem 1rem;
   overflow: auto;
@@ -1518,12 +1610,12 @@ button.md-internal-link:hover {
 
 .markdown-body th,
 .markdown-body td {
-  border: 1px solid #30363d;
+  border: 1px solid var(--md-border);
   padding: 0.4rem 0.65rem;
 }
 
 .markdown-body th {
-  background: #161b22;
+  background: var(--md-th-bg);
   font-weight: 600;
 }
 
@@ -1534,7 +1626,7 @@ button.md-internal-link:hover {
 
 .markdown-body hr {
   border: none;
-  border-top: 1px solid #30363d;
+  border-top: 1px solid var(--md-hr);
   margin: 1.25rem 0;
 }
 
@@ -1944,14 +2036,14 @@ html[data-theme="light"] .repo-view-ios {
 }
 
 .repo-markdown-mode-toggle {
-  display: inline-flex;
+  display: flex;
+  align-items: center;
   gap: 0.2rem;
   margin: 0.55rem 1.1rem 0;
   padding: 0.15rem;
   border-radius: 8px;
   border: 0.5px solid var(--ios-separator);
   background: var(--ios-group2);
-  width: fit-content;
 }
 
 .repo-markdown-mode-toggle button {
@@ -1968,6 +2060,195 @@ html[data-theme="light"] .repo-view-ios {
 .repo-markdown-mode-toggle button.active {
   background: var(--ios-bg);
   color: var(--ios-label);
+}
+
+.repo-reader-expand-btn {
+  margin-left: auto;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: none;
+  background: transparent;
+  color: var(--ios-secondary);
+  border-radius: 6px;
+  padding: 0.28rem 0.45rem;
+  min-height: 28px;
+  min-width: 28px;
+  font-size: 0.88rem;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.repo-reader-expand-btn:hover {
+  background: var(--ios-group2);
+  color: var(--ios-label);
+}
+
+.repo-reader-icon {
+  flex-shrink: 0;
+}
+
+/* ── full-page reader mode (markdown) ── */
+
+.repo-view-ios.reader-mode {
+  margin: 0;
+  padding: 0 0 0.5rem;
+  /* 填满上层 flex 区，不用 min-height:100vh 顶破 .main 导致外层滚动 */
+  flex: 1;
+  min-height: 0;
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+}
+
+.repo-view-ios.reader-mode .repo-ios-header {
+  display: none;
+}
+
+.repo-view-ios.reader-mode .repo-code-toolbar,
+.repo-view-ios.reader-mode .repo-commit-strip,
+.repo-view-ios.reader-mode .repo-about-sidebar {
+  display: none !important;
+}
+
+.repo-view-ios.reader-mode .repo-code-page {
+  grid-template-columns: 1fr;
+  gap: 0;
+  align-items: stretch;
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.repo-view-ios.reader-mode .repo-code-main {
+  flex: 1;
+  min-height: 0;
+  gap: 0;
+}
+
+.repo-view-ios.reader-mode .repo-code-columns.reader-expanded {
+  flex: 1;
+  min-height: 0;
+  align-items: stretch;
+  gap: 0;
+}
+
+.repo-view-ios.reader-mode .repo-reader-panel.repo-code-card {
+  background: var(--ios-bg);
+  border: none;
+  border-radius: 0;
+  box-shadow: none;
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  /* 宽屏下用足横向空间，仍限制最大行宽避免过宽难读 */
+  max-width: min(100% - 1.5rem, 72rem);
+  width: 100%;
+  margin: 0 auto;
+}
+
+.repo-view-ios.reader-mode .repo-markdown-mode-toggle {
+  margin: 0.5rem 0 0;
+  align-self: flex-start;
+}
+
+.repo-view-ios.reader-mode .repo-ios-viewport {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  -webkit-overflow-scrolling: touch;
+  overscroll-behavior: contain;
+}
+
+.repo-view-ios.reader-mode .repo-ios-markdown {
+  padding: 0.5rem 1.25rem 2.5rem;
+  max-width: none;
+}
+
+.repo-reader-chrome {
+  display: flex;
+  align-items: center;
+  gap: 0.65rem;
+  flex-shrink: 0;
+  padding: 0.55rem 0.75rem;
+  margin: 0 0 0.35rem;
+  position: sticky;
+  top: 0;
+  z-index: 30;
+  background: var(--ios-bg);
+  background: color-mix(in srgb, var(--ios-bg) 88%, transparent);
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+  border-bottom: 0.5px solid var(--ios-separator);
+}
+
+/* 阅读布局下滚动只在 .repo-ios-viewport；祖先含 overflow:hidden 时 sticky 易失效，顶栏用普通过块级即可固定在上 */
+.repo-view-ios.reader-mode .repo-reader-chrome {
+  position: relative;
+  top: auto;
+}
+
+.repo-reader-chrome-hub {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.15rem;
+  border: none;
+  background: transparent;
+  color: var(--ios-accent);
+  font: inherit;
+  font-size: 1rem;
+  font-weight: 500;
+  padding: 0.35rem 0.45rem;
+  border-radius: 8px;
+  cursor: pointer;
+  flex-shrink: 0;
+}
+
+.repo-reader-chrome-hub:hover {
+  background: var(--ios-group2);
+}
+
+.repo-reader-chrome-hub-chevron {
+  font-size: 1.35rem;
+  line-height: 1;
+  margin-top: -0.05em;
+}
+
+.repo-reader-chrome-title {
+  flex: 1;
+  min-width: 0;
+  margin: 0;
+  text-align: center;
+  font-size: 0.94rem;
+  font-weight: 600;
+  color: var(--ios-label);
+  line-height: 1.25;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.repo-reader-chrome-exit {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+  flex-shrink: 0;
+  background: var(--ios-group2);
+  color: var(--ios-label);
+  font: inherit;
+  font-size: 0.8125rem;
+  font-weight: 600;
+  padding: 0.4rem 0.65rem;
+  border-radius: 8px;
+  border: 0.5px solid var(--ios-separator);
+  cursor: pointer;
+}
+
+.repo-reader-chrome-exit:hover {
+  background: var(--ios-fill);
 }
 
 .repo-ios-bc-sep {
@@ -2274,10 +2555,12 @@ html[data-theme="light"] .repo-view-ios {
   grid-template-columns: minmax(0, 1fr) minmax(220px, 280px);
   gap: 1.25rem;
   align-items: start;
+  min-height: 0;
 }
 
 .repo-code-main {
   min-width: 0;
+  min-height: 0;
   display: flex;
   flex-direction: column;
   gap: 0.85rem;
@@ -2324,6 +2607,127 @@ html[data-theme="light"] .repo-view-ios {
 
 .repo-code-search::placeholder {
   color: var(--ios-tertiary);
+}
+
+.repo-code-goto-trigger {
+  flex: 1;
+  min-width: 140px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem;
+  padding: 0.45rem 0.75rem;
+  border-radius: 8px;
+  border: 0.5px solid var(--ios-separator);
+  background: var(--ios-bg);
+  color: var(--ios-secondary);
+  font: inherit;
+  font-size: 0.875rem;
+  text-align: left;
+  cursor: pointer;
+}
+
+.repo-code-goto-trigger:hover {
+  color: var(--ios-label);
+  border-color: var(--ios-accent);
+}
+
+.repo-code-goto-kbd {
+  flex-shrink: 0;
+  font-family: ui-monospace, "SF Mono", Menlo, monospace;
+  font-size: 0.7rem;
+  font-weight: 500;
+  padding: 0.12rem 0.4rem;
+  border-radius: 4px;
+  background: var(--ios-group2);
+  color: var(--ios-tertiary);
+  border: 0.5px solid var(--ios-separator);
+}
+
+.repo-goto-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 3000;
+  background: rgba(0, 0, 0, 0.48);
+  display: flex;
+  align-items: flex-start;
+  justify-content: center;
+  padding: min(12vh, 6rem) 1rem 2rem;
+  box-sizing: border-box;
+}
+
+.repo-goto-dialog {
+  width: min(100%, 34rem);
+  max-height: min(72vh, 30rem);
+  display: flex;
+  flex-direction: column;
+  background: var(--ios-group);
+  border: 0.5px solid var(--ios-separator);
+  border-radius: var(--ios-radius-lg);
+  box-shadow: 0 20px 60px rgba(0, 0, 0, 0.4);
+  overflow: hidden;
+}
+
+.repo-goto-input {
+  width: 100%;
+  box-sizing: border-box;
+  border: none;
+  border-bottom: 0.5px solid var(--ios-separator);
+  padding: 0.75rem 1rem;
+  font: inherit;
+  font-size: 0.9375rem;
+  background: var(--ios-bg);
+  color: var(--ios-label);
+  outline: none;
+}
+
+.repo-goto-hint {
+  margin: 0;
+  padding: 0.4rem 1rem 0.35rem;
+  font-size: 0.72rem;
+  color: var(--ios-tertiary);
+  line-height: 1.35;
+}
+
+.repo-goto-list {
+  list-style: none;
+  margin: 0;
+  padding: 0 0 0.35rem;
+  overflow-y: auto;
+  flex: 1;
+  min-height: 0;
+}
+
+.repo-goto-item {
+  padding: 0.5rem 1rem;
+  font-size: 0.8125rem;
+  font-family: ui-monospace, "SF Mono", Menlo, monospace;
+  color: var(--ios-label);
+  cursor: pointer;
+  border: none;
+  width: 100%;
+  text-align: left;
+  background: transparent;
+  display: block;
+  word-break: break-all;
+}
+
+.repo-goto-item:hover,
+.repo-goto-item--active {
+  background: var(--ios-group2);
+}
+
+.repo-goto-item--active {
+  outline: 2px solid var(--ios-accent);
+  outline-offset: -2px;
+}
+
+.repo-goto-empty {
+  margin: 0;
+  padding: 0.85rem 1rem 1rem;
+  color: var(--ios-tertiary);
+  font-size: 0.8125rem;
+  list-style: none;
 }
 
 .repo-commit-strip {
@@ -2404,6 +2808,27 @@ html[data-theme="light"] .repo-view-ios {
   grid-template-columns: minmax(260px, 36%) minmax(0, 1fr);
   gap: 1rem;
   align-items: start;
+  min-height: 0;
+}
+
+.repo-code-columns > .repo-reader-panel {
+  min-height: 0;
+}
+
+.repo-code-columns.reader-expanded {
+  grid-template-columns: 1fr;
+}
+
+.repo-code-columns.reader-expanded > .repo-file-panel {
+  display: none;
+}
+
+.repo-code-columns.reader-expanded > .repo-reader-panel {
+  max-height: none;
+}
+
+.repo-code-columns.reader-expanded .repo-ios-viewport {
+  max-height: none;
 }
 
 .repo-file-panel {
@@ -2596,11 +3021,14 @@ html[data-theme="light"] .repo-file-name-btn.active {
   display: flex;
   flex-direction: column;
   max-height: min(78vh, 760px);
+  min-height: 0;
   overflow: hidden;
 }
 
+/* 关键：允许 flex 子项收缩，否则内容会把 viewport 撑满整页，滚动跑到外层 .main 上，scrollTop 永远是 0 */
 .repo-reader-panel .repo-ios-viewport {
   max-height: none;
+  min-height: 0;
 }
 
 .repo-about-sidebar {
@@ -2912,5 +3340,157 @@ html[data-theme="light"] .repo-file-name-btn.active {
   .repo-ios-file-card {
     max-height: none;
   }
+}
+
+/* ── onboarding empty-state ── */
+
+.hub-onboarding {
+  text-align: center;
+  padding: 2.5rem 1rem 3rem;
+}
+
+.hub-onboarding-title {
+  font-size: 1.15rem;
+  font-weight: 600;
+  margin: 0 0 0.35rem;
+}
+
+.hub-onboarding-desc {
+  color: var(--app-muted);
+  margin: 0 0 1.5rem;
+  font-size: 0.92rem;
+}
+
+.hub-onboarding-cards {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+  gap: 0.85rem;
+  max-width: 720px;
+  margin: 0 auto;
+}
+
+.hub-onboarding-card {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 0.35rem;
+  padding: 1.35rem 1rem;
+  border-radius: var(--radius-lg);
+  border: 1px solid var(--panel-border);
+  background: var(--panel-bg);
+  cursor: pointer;
+  transition: box-shadow 0.15s, border-color 0.15s;
+  text-align: center;
+}
+
+.hub-onboarding-card:hover:not(:disabled) {
+  border-color: var(--shell-accent);
+  box-shadow: var(--card-shadow-hover);
+}
+
+.hub-onboarding-card-primary {
+  border-color: var(--primary-btn-bg);
+  background: var(--primary-btn-bg);
+  color: var(--primary-btn-fg);
+}
+
+.hub-onboarding-card-primary:hover:not(:disabled) {
+  background: var(--primary-btn-hover-bg);
+  border-color: var(--primary-btn-hover-bg);
+}
+
+.hub-onboarding-card-icon {
+  font-size: 1.5rem;
+  line-height: 1;
+}
+
+.hub-onboarding-card-title {
+  font-weight: 600;
+  font-size: 0.95rem;
+}
+
+.hub-onboarding-card-desc {
+  font-size: 0.82rem;
+  opacity: 0.78;
+  line-height: 1.4;
+}
+
+/* ── clone log ── */
+
+.hub-clone-log {
+  max-height: 180px;
+  overflow-y: auto;
+  margin: 0.65rem 0;
+  padding: 0.65rem 0.85rem;
+  font-size: 0.78rem;
+  line-height: 1.5;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  background: var(--code-bg);
+  border: 1px solid var(--panel-border);
+  border-radius: 6px;
+  color: var(--app-fg);
+  white-space: pre-wrap;
+  word-break: break-all;
+}
+
+/* ── settings repo root browse row ── */
+
+.settings-repo-root-row {
+  display: flex;
+  gap: 0.5rem;
+  align-items: center;
+}
+
+.settings-repo-root-row .settings-delete-gate-input {
+  flex: 1;
+  min-width: 0;
+}
+
+/* ── help FAQ ── */
+
+.help-steps {
+  padding-left: 1.35rem;
+  margin: 0.75rem 0;
+}
+
+.help-steps li {
+  margin-bottom: 0.85rem;
+}
+
+.help-steps p {
+  margin: 0.25rem 0 0;
+  color: var(--app-muted);
+  font-size: 0.9rem;
+}
+
+.help-kbd {
+  display: inline-block;
+  font-family: ui-monospace, "SF Mono", Menlo, monospace;
+  font-size: 0.8em;
+  font-weight: 600;
+  padding: 0.1rem 0.35rem;
+  border-radius: 4px;
+  border: 1px solid var(--ios-separator, #ccc);
+  background: var(--ios-group2, rgba(0, 0, 0, 0.06));
+  color: var(--ios-label, inherit);
+}
+
+.help-faq {
+  margin: 0;
+}
+
+.help-faq dt {
+  font-weight: 600;
+  margin-top: 0.85rem;
+}
+
+.help-faq dt:first-child {
+  margin-top: 0;
+}
+
+.help-faq dd {
+  margin: 0.25rem 0 0 0;
+  color: var(--app-muted);
+  font-size: 0.9rem;
 }
 

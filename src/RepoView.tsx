@@ -1,6 +1,7 @@
 import {
   useCallback,
   useEffect,
+  useLayoutEffect,
   useMemo,
   useRef,
   useState,
@@ -45,10 +46,63 @@ import {
   findLicensePath,
   formatRelativeTime,
   listEntriesAtPrefix,
+  rankPathsForGoToFile,
 } from "./repoFileListing";
 
 type Tab = "files" | "commits" | "changes" | "releases";
 type MarkdownViewMode = "preview" | "code";
+
+function IconReaderEnter() {
+  return (
+    <svg
+      className="repo-reader-icon"
+      width="18"
+      height="18"
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="2"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      aria-hidden
+    >
+      <polyline points="15 3 21 3 21 9" />
+      <polyline points="9 21 3 21 3 15" />
+      <line x1="21" y1="3" x2="14" y2="10" />
+      <line x1="3" y1="21" x2="10" y2="14" />
+    </svg>
+  );
+}
+
+function resetDocumentScrollToTop() {
+  window.scrollTo(0, 0);
+  const se = document.scrollingElement;
+  if (se instanceof HTMLElement) se.scrollTop = 0;
+  document.documentElement.scrollTop = 0;
+  document.body.scrollTop = 0;
+}
+
+function IconReaderExit() {
+  return (
+    <svg
+      className="repo-reader-icon"
+      width="18"
+      height="18"
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="2"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      aria-hidden
+    >
+      <polyline points="4 14 10 14 10 20" />
+      <polyline points="20 10 14 10 14 4" />
+      <line x1="14" y1="10" x2="21" y2="3" />
+      <line x1="3" y1="21" x2="10" y2="14" />
+    </svg>
+  );
+}
 
 type BlobViewState =
   | { kind: "idle" }
@@ -146,11 +200,13 @@ function PathLastCommitCell({
   path,
   cacheRef,
   cacheVersion,
+  locale,
 }: {
   rev: string;
   path: string;
   cacheRef: MutableRefObject<Map<string, CommitSummary | null>>;
   cacheVersion: number;
+  locale: "zh-CN" | "en-US";
 }) {
   const [line, setLine] = useState<string | null>(null);
 
@@ -160,13 +216,13 @@ function PathLastCommitCell({
       const c = cacheRef.current.get(key);
       setLine(
         c
-          ? `${c.subject.slice(0, 72)}${c.subject.length > 72 ? "…" : ""} · ${formatRelativeTime(c.dateUnix)}`
+          ? `${c.subject.slice(0, 72)}${c.subject.length > 72 ? "…" : ""} · ${formatRelativeTime(c.dateUnix, locale)}`
           : "—",
       );
       return;
     }
     setLine(null);
-  }, [rev, path, cacheRef, cacheVersion]);
+  }, [rev, path, cacheRef, cacheVersion, locale]);
 
   return (
     <span className={`repo-file-col-msg${line === null ? " skeleton" : ""}`}>
@@ -196,7 +252,22 @@ export function RepoView({ repo, locale = "zh-CN", onBack, onUpdateRepo, onRemov
   const [refLists, setRefLists] = useState<RefLists | null>(null);
   const [remotes, setRemotes] = useState<RemoteInfo[]>([]);
   const [filePrefix, setFilePrefix] = useState("");
-  const [fileFilter, setFileFilter] = useState("");
+  const [goToFileOpen, setGoToFileOpen] = useState(false);
+  const [goToFileQuery, setGoToFileQuery] = useState("");
+  const [goToFileIndex, setGoToFileIndex] = useState(0);
+  const goToFileInputRef = useRef<HTMLInputElement>(null);
+  const goToFileActiveRef = useRef<HTMLButtonElement>(null);
+  const goToFileTriggerRef = useRef<HTMLButtonElement>(null);
+
+  const closeGoToFileModal = useCallback((focusTrigger: boolean) => {
+    setGoToFileOpen(false);
+    setGoToFileQuery("");
+    setGoToFileIndex(0);
+    if (focusTrigger) {
+      requestAnimationFrame(() => goToFileTriggerRef.current?.focus());
+    }
+  }, []);
+
   const [headCommit, setHeadCommit] = useState<CommitSummary | null>(null);
   const [revCount, setRevCount] = useState<number>(0);
   const [readmeBlurb, setReadmeBlurb] = useState<string | null>(null);
@@ -208,6 +279,81 @@ export function RepoView({ repo, locale = "zh-CN", onBack, onUpdateRepo, onRemov
   const [deleteBusy, setDeleteBusy] = useState(false);
   const [markdownViewMode, setMarkdownViewMode] =
     useState<MarkdownViewMode>("preview");
+  const [readerExpanded, setReaderExpanded] = useState(false);
+  const readerViewportRef = useRef<HTMLDivElement>(null);
+  type ReaderScrollRestore = {
+    targetY: number;
+    ratio: number;
+    mode: "enter-reader" | "exit-reader";
+    ratioFallbackDone: boolean;
+  };
+  const readerScrollRestoreRef = useRef<ReaderScrollRestore | null>(null);
+  const readerScrollAnchorRef = useRef<Element | null>(null);
+
+  const captureMarkdownScrollY = useCallback((): number => {
+    const vp = readerViewportRef.current;
+    if (vp && vp.scrollTop > 0) return vp.scrollTop;
+    let el: HTMLElement | null = vp;
+    for (let i = 0; i < 28 && el; i++) {
+      if (el.scrollTop > 0) return el.scrollTop;
+      el = el.parentElement;
+    }
+    const main = document.querySelector(".app-shell .main");
+    if (main instanceof HTMLElement && main.scrollTop > 0) {
+      return main.scrollTop;
+    }
+    const docY = Math.max(
+      window.scrollY,
+      document.documentElement.scrollTop,
+      document.body.scrollTop,
+      document.scrollingElement instanceof HTMLElement
+        ? document.scrollingElement.scrollTop
+        : 0,
+    );
+    if (docY > 0) return docY;
+    return vp?.scrollTop ?? 0;
+  }, []);
+
+  const setReaderExpandedPreserveScroll = useCallback(
+    (next: boolean) => {
+      if (blob.kind === "markdown") {
+        const vp = readerViewportRef.current;
+        const y = captureMarkdownScrollY();
+        const maxS = vp ? Math.max(0, vp.scrollHeight - vp.clientHeight) : 0;
+        const ratio = vp && maxS > 0 ? vp.scrollTop / maxS : 0;
+        readerScrollRestoreRef.current = {
+          targetY: y,
+          ratio,
+          mode: next ? "enter-reader" : "exit-reader",
+          ratioFallbackDone: false,
+        };
+        readerScrollAnchorRef.current = null;
+        if (next && vp) {
+          const r = vp.getBoundingClientRect();
+          if (r.width > 0 && r.height > 0) {
+            const pad = 6;
+            const cx = Math.max(
+              r.left + pad,
+              Math.min(r.right - pad, r.left + r.width * 0.5),
+            );
+            const cy = Math.max(
+              r.top + pad,
+              Math.min(r.bottom - pad, r.top + r.height * 0.5),
+            );
+            const hit = document.elementFromPoint(cx, cy);
+            if (hit && vp.contains(hit)) {
+              readerScrollAnchorRef.current =
+                hit.closest(
+                  "p, li, h1, h2, h3, h4, h5, h6, pre, blockquote, .markdown-body",
+                ) ?? hit;
+            }
+          }
+        }
+      }
+      setReaderExpanded(next);
+    },
+    [blob.kind, captureMarkdownScrollY],
+  );
   const [releaseDrafts, setReleaseDrafts] = useState<ReleaseEntry[]>([]);
   const [releaseSavedSnapshot, setReleaseSavedSnapshot] = useState("[]");
   const [releaseSaving, setReleaseSaving] = useState(false);
@@ -216,10 +362,6 @@ export function RepoView({ repo, locale = "zh-CN", onBack, onUpdateRepo, onRemov
     ? "Releases 有未保存变更，确定离开并丢弃这些修改吗？"
     : "You have unsaved release changes. Leave and discard these edits?";
 
-  const blobPaths = useMemo(
-    () => tree.filter((e) => e.objectType === "blob").map((e) => e.path),
-    [tree],
-  );
   const draftTags = useMemo(
     () => [...new Set(tagDraftList.map((t) => t.trim()).filter(Boolean))],
     [tagDraftList],
@@ -243,14 +385,22 @@ export function RepoView({ repo, locale = "zh-CN", onBack, onUpdateRepo, onRemov
     [releaseDraftSnapshot, releaseSavedSnapshot],
   );
 
+  const blobPaths = useMemo(
+    () => tree.filter((e) => e.objectType === "blob").map((e) => e.path),
+    [tree],
+  );
+
   const licensePath = useMemo(() => findLicensePath(blobPaths), [blobPaths]);
 
-  const fileEntries = useMemo(() => {
-    const entries = listEntriesAtPrefix(blobPaths, filePrefix);
-    const q = fileFilter.trim().toLowerCase();
-    if (!q) return entries;
-    return entries.filter((e) => e.name.toLowerCase().includes(q));
-  }, [blobPaths, filePrefix, fileFilter]);
+  const fileEntries = useMemo(
+    () => listEntriesAtPrefix(blobPaths, filePrefix),
+    [blobPaths, filePrefix],
+  );
+
+  const goToFileResults = useMemo(
+    () => rankPathsForGoToFile(goToFileQuery, blobPaths),
+    [goToFileQuery, blobPaths],
+  );
 
   useEffect(() => {
     if (tab !== "files" || fileEntries.length === 0) return;
@@ -296,7 +446,7 @@ export function RepoView({ repo, locale = "zh-CN", onBack, onUpdateRepo, onRemov
   useEffect(() => {
     setRev("HEAD");
     setFilePrefix("");
-    setFileFilter("");
+    closeGoToFileModal(false);
     pathCommitCache.current.clear();
     setReadmeBlurb(null);
     autoReadmeDone.current = false;
@@ -305,7 +455,7 @@ export function RepoView({ repo, locale = "zh-CN", onBack, onUpdateRepo, onRemov
     setIntroDraft(repo.projectIntro ?? "");
     setReleaseDrafts([]);
     setReleaseSavedSnapshot("[]");
-  }, [repo.id]);
+  }, [repo.id, closeGoToFileModal]);
 
   useEffect(() => {
     setTagDraftList(repo.tags);
@@ -400,6 +550,210 @@ export function RepoView({ repo, locale = "zh-CN", onBack, onUpdateRepo, onRemov
     };
   }, [tab, repo.id, rev]);
 
+  useEffect(() => {
+    if (blob.kind !== "markdown") setReaderExpanded(false);
+  }, [blob.kind]);
+
+  useEffect(() => {
+    if (tab !== "files") setReaderExpanded(false);
+  }, [tab]);
+
+  useEffect(() => {
+    const immersive = readerExpanded && tab === "files";
+    if (immersive) {
+      document.documentElement.dataset.repoReader = "1";
+    } else {
+      delete document.documentElement.dataset.repoReader;
+    }
+    return () => {
+      delete document.documentElement.dataset.repoReader;
+    };
+  }, [readerExpanded, tab]);
+
+  useLayoutEffect(() => {
+    if (blob.kind !== "markdown") {
+      readerScrollRestoreRef.current = null;
+      readerScrollAnchorRef.current = null;
+      return;
+    }
+
+    const pending = readerScrollRestoreRef.current;
+    if (!pending) return;
+
+    const vp = readerViewportRef.current;
+    if (!vp) return;
+
+    const { targetY, mode } = pending;
+
+    if (mode === "enter-reader" && readerExpanded) {
+      const main = document.querySelector(".app-shell .main");
+      if (main instanceof HTMLElement) main.scrollTop = 0;
+      resetDocumentScrollToTop();
+      const maxScroll = Math.max(0, vp.scrollHeight - vp.clientHeight);
+      vp.scrollTop = Math.min(targetY, maxScroll);
+      return;
+    }
+
+    if (mode === "exit-reader" && !readerExpanded) {
+      const maxScroll = Math.max(0, vp.scrollHeight - vp.clientHeight);
+      vp.scrollTop = Math.min(targetY, maxScroll);
+      return;
+    }
+  }, [readerExpanded, blob.kind]);
+
+  useEffect(() => {
+    if (blob.kind !== "markdown" || !readerExpanded) return;
+
+    const pending = readerScrollRestoreRef.current;
+    if (!pending || pending.mode !== "enter-reader") return;
+
+    const vp = readerViewportRef.current;
+    if (!vp) return;
+
+    const EPS = 2;
+    let cancelled = false;
+    let timeoutId: ReturnType<typeof setTimeout> | undefined;
+
+    const finish = () => {
+      if (timeoutId !== undefined) {
+        clearTimeout(timeoutId);
+        timeoutId = undefined;
+      }
+    };
+
+    const tryRestore = (): boolean => {
+      if (cancelled) return true;
+      const p = readerScrollRestoreRef.current;
+      if (!p || p.mode !== "enter-reader") return true;
+
+      const maxScroll = Math.max(0, vp.scrollHeight - vp.clientHeight);
+      const y = p.targetY;
+
+      if (y > 0 && maxScroll === 0) return false;
+
+      const desired = Math.min(y, maxScroll);
+      vp.scrollTop = desired;
+
+      const atTarget =
+        y === 0 ||
+        (maxScroll > 0 &&
+          Math.abs(vp.scrollTop - desired) < EPS &&
+          (maxScroll >= y - EPS || y > maxScroll));
+
+      if (atTarget) {
+        readerScrollRestoreRef.current = null;
+        readerScrollAnchorRef.current = null;
+        return true;
+      }
+      return false;
+    };
+
+    const obs = new ResizeObserver(() => {
+      if (cancelled) return;
+      if (tryRestore()) {
+        obs.disconnect();
+        finish();
+      }
+    });
+    obs.observe(vp);
+
+    const raf0 = requestAnimationFrame(() => {
+      requestAnimationFrame(() => {
+        if (cancelled) return;
+        if (tryRestore()) {
+          obs.disconnect();
+          finish();
+        }
+      });
+    });
+
+    timeoutId = setTimeout(() => {
+      if (cancelled) return;
+      const p = readerScrollRestoreRef.current;
+      if (p?.mode === "enter-reader") {
+        const maxScroll = Math.max(0, vp.scrollHeight - vp.clientHeight);
+        if (!p.ratioFallbackDone && maxScroll > 0) {
+          p.ratioFallbackDone = true;
+          vp.scrollTop = Math.round(
+            Math.min(1, Math.max(0, p.ratio)) * maxScroll,
+          );
+        }
+        const anchor = readerScrollAnchorRef.current;
+        if (
+          anchor &&
+          vp.isConnected &&
+          vp.contains(anchor) &&
+          p.targetY > 60 &&
+          vp.scrollTop < p.targetY * 0.35
+        ) {
+          anchor.scrollIntoView({ block: "center", inline: "nearest" });
+        }
+      }
+      readerScrollAnchorRef.current = null;
+      readerScrollRestoreRef.current = null;
+      obs.disconnect();
+    }, 500);
+
+    return () => {
+      cancelled = true;
+      cancelAnimationFrame(raf0);
+      finish();
+      obs.disconnect();
+    };
+  }, [readerExpanded, blob.kind]);
+
+  useEffect(() => {
+    if (blob.kind !== "markdown" || readerExpanded) return;
+
+    const pending = readerScrollRestoreRef.current;
+    if (!pending || pending.mode !== "exit-reader") return;
+
+    const vp = readerViewportRef.current;
+    if (!vp) {
+      readerScrollRestoreRef.current = null;
+      return;
+    }
+
+    let rafOuter: number;
+    let cancelled = false;
+
+    rafOuter = requestAnimationFrame(() => {
+      requestAnimationFrame(() => {
+        if (cancelled) return;
+        const p = readerScrollRestoreRef.current;
+        if (p?.mode === "exit-reader" && readerViewportRef.current) {
+          const el = readerViewportRef.current;
+          const maxScroll = Math.max(0, el.scrollHeight - el.clientHeight);
+          el.scrollTop = Math.min(p.targetY, maxScroll);
+        }
+        readerScrollRestoreRef.current = null;
+      });
+    });
+
+    return () => {
+      cancelled = true;
+      cancelAnimationFrame(rafOuter);
+    };
+  }, [readerExpanded, blob.kind]);
+
+  useEffect(() => {
+    if (!readerExpanded) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") {
+        e.preventDefault();
+        setReaderExpandedPreserveScroll(false);
+      }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [readerExpanded, setReaderExpandedPreserveScroll]);
+
+  const readerDocName = useMemo(() => {
+    if (!selectedPath) return "";
+    const i = selectedPath.lastIndexOf("/");
+    return i >= 0 ? selectedPath.slice(i + 1) : selectedPath;
+  }, [selectedPath]);
+
   const openBlob = useCallback(
     async (path: string) => {
       setSelectedPath(path);
@@ -453,6 +807,75 @@ export function RepoView({ repo, locale = "zh-CN", onBack, onUpdateRepo, onRemov
       }
     },
     [repo.id, rev, blobPaths],
+  );
+
+  const navigateToGoToFilePath = useCallback(
+    (path: string) => {
+      const lastSlash = path.lastIndexOf("/");
+      setFilePrefix(lastSlash >= 0 ? path.slice(0, lastSlash) : "");
+      closeGoToFileModal(false);
+      void openBlob(path);
+    },
+    [openBlob, closeGoToFileModal],
+  );
+
+  useEffect(() => {
+    setGoToFileIndex(0);
+  }, [goToFileQuery]);
+
+  useEffect(() => {
+    if (!goToFileOpen) return;
+    const id = requestAnimationFrame(() => {
+      goToFileInputRef.current?.focus();
+      goToFileInputRef.current?.select();
+    });
+    return () => cancelAnimationFrame(id);
+  }, [goToFileOpen]);
+
+  useLayoutEffect(() => {
+    if (!goToFileOpen) return;
+    goToFileActiveRef.current?.scrollIntoView({ block: "nearest" });
+  }, [goToFileOpen, goToFileIndex, goToFileResults]);
+
+  useEffect(() => {
+    if (tab !== "files" || readerExpanded) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (goToFileOpen) return;
+      if (e.key !== "t" && e.key !== "T") return;
+      if (e.ctrlKey || e.metaKey || e.altKey) return;
+      const el = e.target as HTMLElement | null;
+      if (el?.closest("input, textarea, select, [contenteditable=true]")) {
+        return;
+      }
+      e.preventDefault();
+      setGoToFileOpen(true);
+      setGoToFileQuery("");
+    };
+    document.addEventListener("keydown", onKey);
+    return () => document.removeEventListener("keydown", onKey);
+  }, [tab, readerExpanded, goToFileOpen]);
+
+  const onGoToFileKeyDown = useCallback(
+    (e: React.KeyboardEvent) => {
+      if (e.key === "Escape") {
+        e.preventDefault();
+        closeGoToFileModal(true);
+        return;
+      }
+      if (goToFileResults.length === 0) return;
+      if (e.key === "ArrowDown") {
+        e.preventDefault();
+        setGoToFileIndex((i) => Math.min(goToFileResults.length - 1, i + 1));
+      } else if (e.key === "ArrowUp") {
+        e.preventDefault();
+        setGoToFileIndex((i) => Math.max(0, i - 1));
+      } else if (e.key === "Enter") {
+        e.preventDefault();
+        const path = goToFileResults[goToFileIndex];
+        if (path) navigateToGoToFilePath(path);
+      }
+    },
+    [goToFileResults, goToFileIndex, navigateToGoToFilePath, closeGoToFileModal],
   );
 
   useEffect(() => {
@@ -726,7 +1149,9 @@ export function RepoView({ repo, locale = "zh-CN", onBack, onUpdateRepo, onRemov
     : [];
 
   return (
-    <div className="repo-view repo-view-ios">
+    <div
+      className={`repo-view repo-view-ios${readerExpanded && tab === "files" ? " reader-mode" : ""}`}
+    >
       <header className="repo-ios-header">
         <div className="repo-ios-nav-row">
           <button
@@ -803,6 +1228,40 @@ export function RepoView({ repo, locale = "zh-CN", onBack, onUpdateRepo, onRemov
       </header>
       {error && <div className="repo-ios-error">{error}</div>}
 
+      {tab === "files" && readerExpanded && (
+        <header className="repo-reader-chrome">
+          <button
+            type="button"
+            className="repo-reader-chrome-hub"
+            onClick={() => {
+              if (!confirmLeaveReleases()) return;
+              setReaderExpandedPreserveScroll(false);
+              onBack();
+            }}
+          >
+            <span className="repo-reader-chrome-hub-chevron" aria-hidden>
+              ‹
+            </span>
+            {isZh ? "门户" : "Hub"}
+          </button>
+          <h1
+            className="repo-reader-chrome-title"
+            title={selectedPath ?? undefined}
+          >
+            {readerDocName || title}
+          </h1>
+          <button
+            type="button"
+            className="repo-reader-chrome-exit"
+            onClick={() => setReaderExpandedPreserveScroll(false)}
+            title={isZh ? "退出阅读 (Esc)" : "Exit reader (Esc)"}
+          >
+            <IconReaderExit />
+            <span>{isZh ? "退出阅读" : "Exit reader"}</span>
+          </button>
+        </header>
+      )}
+
       {tab === "files" && (
         <div className="repo-code-page">
           <div className="repo-code-main">
@@ -836,14 +1295,21 @@ export function RepoView({ repo, locale = "zh-CN", onBack, onUpdateRepo, onRemov
                   )}
                 </select>
               </label>
-              <input
-                type="search"
-                className="repo-code-search"
-                placeholder={isZh ? "过滤当前目录…" : "Filter current directory..."}
-                value={fileFilter}
-                onChange={(e) => setFileFilter(e.target.value)}
-                aria-label={isZh ? "过滤文件" : "Filter files"}
-              />
+              <button
+                ref={goToFileTriggerRef}
+                type="button"
+                className="repo-code-goto-trigger"
+                onClick={() => {
+                  setGoToFileOpen(true);
+                  setGoToFileQuery("");
+                }}
+                aria-haspopup="dialog"
+                aria-expanded={goToFileOpen}
+                aria-label={isZh ? "转到文件" : "Go to file"}
+              >
+                <span>{isZh ? "转到文件…" : "Go to file…"}</span>
+                <kbd className="repo-code-goto-kbd">t</kbd>
+              </button>
             </div>
 
             <div className="repo-commit-strip repo-code-card">
@@ -860,7 +1326,7 @@ export function RepoView({ repo, locale = "zh-CN", onBack, onUpdateRepo, onRemov
                       {headCommit.id.slice(0, 7)}
                     </code>
                     <span className="repo-commit-time">
-                      {formatRelativeTime(headCommit.dateUnix)}
+                      {formatRelativeTime(headCommit.dateUnix, locale)}
                     </span>
                     <button
                       type="button"
@@ -876,7 +1342,7 @@ export function RepoView({ repo, locale = "zh-CN", onBack, onUpdateRepo, onRemov
               )}
             </div>
 
-            <div className="repo-code-columns">
+            <div className={`repo-code-columns${readerExpanded ? " reader-expanded" : ""}`}>
               <div className="repo-file-panel repo-code-card">
                 <div className="repo-file-panel-head">
                   <span>{isZh ? "文件" : "Files"}</span>
@@ -927,7 +1393,13 @@ export function RepoView({ repo, locale = "zh-CN", onBack, onUpdateRepo, onRemov
                       {fileEntries.length === 0 ? (
                         <tr>
                           <td colSpan={2} className="repo-file-empty">
-                            {blobPaths.length === 0 ? (isZh ? "暂无文件" : "No files") : (isZh ? "无匹配项" : "No matches")}
+                            {blobPaths.length === 0
+                              ? isZh
+                                ? "暂无文件"
+                                : "No files"
+                              : isZh
+                                ? "无匹配项"
+                                : "No matches"}
                           </td>
                         </tr>
                       ) : (
@@ -966,6 +1438,7 @@ export function RepoView({ repo, locale = "zh-CN", onBack, onUpdateRepo, onRemov
                                 }
                                 cacheRef={pathCommitCache}
                                 cacheVersion={pathCommitVersion}
+                                locale={locale}
                               />
                             </td>
                           </tr>
@@ -977,25 +1450,27 @@ export function RepoView({ repo, locale = "zh-CN", onBack, onUpdateRepo, onRemov
               </div>
 
               <section className="repo-reader-panel repo-code-card" aria-label={isZh ? "文件内容" : "File contents"}>
-                <div className="repo-ios-breadcrumb" aria-label={isZh ? "当前文件" : "Current file"}>
-                  {selectedPath?.split("/").map((part, i, arr) => (
-                    <span key={`${i}-${part}`}>
-                      {i > 0 && <span className="repo-ios-bc-sep">/</span>}
-                      <span
-                        className={
-                          i === arr.length - 1
-                            ? "repo-ios-bc-current"
-                            : "repo-ios-bc-part"
-                        }
-                      >
-                        {part}
+                {!readerExpanded && (
+                  <div className="repo-ios-breadcrumb" aria-label={isZh ? "当前文件" : "Current file"}>
+                    {selectedPath?.split("/").map((part, i, arr) => (
+                      <span key={`${i}-${part}`}>
+                        {i > 0 && <span className="repo-ios-bc-sep">/</span>}
+                        <span
+                          className={
+                            i === arr.length - 1
+                              ? "repo-ios-bc-current"
+                              : "repo-ios-bc-part"
+                          }
+                        >
+                          {part}
+                        </span>
                       </span>
-                    </span>
-                  ))}
-                  {!selectedPath && (
-                    <span className="repo-ios-bc-placeholder">{isZh ? "选择文件" : "Select a file"}</span>
-                  )}
-                </div>
+                    ))}
+                    {!selectedPath && (
+                      <span className="repo-ios-bc-placeholder">{isZh ? "选择文件" : "Select a file"}</span>
+                    )}
+                  </div>
+                )}
                 {blob.kind === "markdown" && (
                   <div
                     className="repo-markdown-mode-toggle"
@@ -1032,9 +1507,20 @@ export function RepoView({ repo, locale = "zh-CN", onBack, onUpdateRepo, onRemov
                     >
                       Code
                     </button>
+                    {!readerExpanded && (
+                      <button
+                        type="button"
+                        className="repo-reader-expand-btn"
+                        title={isZh ? "阅读模式" : "Reader mode"}
+                        aria-label={isZh ? "进入阅读模式" : "Enter reader mode"}
+                        onClick={() => setReaderExpandedPreserveScroll(true)}
+                      >
+                        <IconReaderEnter />
+                      </button>
+                    )}
                   </div>
                 )}
-                <div className="repo-ios-viewport">
+                <div className="repo-ios-viewport" ref={readerViewportRef}>
                   {blob.kind === "idle" && (
                     <p className="repo-ios-placeholder">
                       {isZh
@@ -1514,6 +2000,75 @@ export function RepoView({ repo, locale = "zh-CN", onBack, onUpdateRepo, onRemov
             >
               {isZh ? "提交" : "Commit"}
             </button>
+          </div>
+        </div>
+      )}
+
+      {goToFileOpen && (
+        <div
+          className="repo-goto-overlay"
+          role="presentation"
+          onMouseDown={(e) => {
+            if (e.target === e.currentTarget) closeGoToFileModal(true);
+          }}
+        >
+          <div
+            className="repo-goto-dialog"
+            role="dialog"
+            aria-modal="true"
+            aria-label={isZh ? "转到文件" : "Go to file"}
+            onMouseDown={(e) => e.stopPropagation()}
+            onKeyDown={onGoToFileKeyDown}
+          >
+            <input
+              ref={goToFileInputRef}
+              type="search"
+              className="repo-goto-input"
+              placeholder={isZh ? "输入文件名…" : "Type file name…"}
+              value={goToFileQuery}
+              onChange={(e) => setGoToFileQuery(e.target.value)}
+              autoCapitalize="off"
+              autoCorrect="off"
+              spellCheck={false}
+              aria-describedby="repo-goto-hint"
+            />
+            <p className="repo-goto-hint" id="repo-goto-hint">
+              {isZh
+                ? "↑↓ 选择 · Enter 打开 · Esc 关闭"
+                : "↑↓ to select · Enter to open · Esc to close"}
+            </p>
+            <ul className="repo-goto-list" role="listbox" aria-label={isZh ? "匹配文件" : "Matching files"}>
+              {goToFileQuery.trim() === "" ? (
+                <li className="repo-goto-empty" role="presentation">
+                  {isZh ? "输入以搜索仓库内路径" : "Start typing to search files"}
+                </li>
+              ) : goToFileResults.length === 0 ? (
+                <li className="repo-goto-empty" role="presentation">
+                  {isZh ? "没有匹配的文件" : "No matching files"}
+                </li>
+              ) : (
+                goToFileResults.map((path, i) => (
+                  <li key={path} role="none">
+                    <button
+                      type="button"
+                      role="option"
+                      id={`repo-goto-opt-${i}`}
+                      aria-selected={i === goToFileIndex}
+                      ref={i === goToFileIndex ? goToFileActiveRef : undefined}
+                      className={
+                        i === goToFileIndex
+                          ? "repo-goto-item repo-goto-item--active"
+                          : "repo-goto-item"
+                      }
+                      onMouseEnter={() => setGoToFileIndex(i)}
+                      onClick={() => navigateToGoToFilePath(path)}
+                    >
+                      {path}
+                    </button>
+                  </li>
+                ))
+              )}
+            </ul>
           </div>
         </div>
       )}

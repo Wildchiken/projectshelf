@@ -755,6 +755,25 @@ dependencies = [
 ]
 
 [[package]]
+name = "deskvio"
+version = "1.1.0"
+dependencies = [
+ "base64 0.22.1",
+ "directories",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "tauri",
+ "tauri-build",
+ "tauri-plugin-dialog",
+ "tauri-plugin-opener",
+ "thiserror 2.0.18",
+ "uuid",
+ "walkdir",
+ "zip",
+]
+
+[[package]]
 name = "digest"
 version = "0.10.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2887,25 +2906,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8fd00f0bb2e90d81d1044c2b32617f68fcb9fa3bb7640c23e9c748e53fb30934"
 dependencies = [
  "unicode-ident",
-]
-
-[[package]]
-name = "projectshelf"
-version = "1.0.0"
-dependencies = [
- "base64 0.22.1",
- "directories",
- "rusqlite",
- "serde",
- "serde_json",
- "tauri",
- "tauri-build",
- "tauri-plugin-dialog",
- "tauri-plugin-opener",
- "thiserror 2.0.18",
- "uuid",
- "walkdir",
- "zip",
 ]
 
 [[package]]

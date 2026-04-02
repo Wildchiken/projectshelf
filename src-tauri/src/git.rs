@@ -1,4 +1,4 @@
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use thiserror::Error;
@@ -95,7 +95,27 @@ pub fn head_sha(git: &Path, ctx: &RepoContext) -> Result<String, GitError> {
     Ok(out.trim().to_string())
 }
 
-#[derive(Debug, Serialize)]
+pub fn rev_parse_verify(git: &Path, ctx: &RepoContext, spec: &str) -> Result<String, GitError> {
+    let c = ctx.root.to_string_lossy();
+    let out = run_git(
+        git,
+        &[
+            "-C".into(),
+            c.to_string(),
+            "rev-parse".into(),
+            "-q".into(),
+            "--verify".into(),
+            spec.to_string(),
+        ],
+    )?;
+    let s = out.trim().to_string();
+    if s.is_empty() {
+        return Err(GitError::Run("rev-parse returned empty".into()));
+    }
+    Ok(s)
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TreeEntry {
     pub path: String,
@@ -104,18 +124,7 @@ pub struct TreeEntry {
     pub object_id: String,
 }
 
-pub fn ls_tree(git: &Path, ctx: &RepoContext, treeish: &str) -> Result<Vec<TreeEntry>, GitError> {
-    let c = ctx.root.to_string_lossy();
-    let out = run_git(
-        git,
-        &[
-            "-C".into(),
-            c.to_string(),
-            "ls-tree".into(),
-            "-r".into(),
-            treeish.to_string(),
-        ],
-    )?;
+fn parse_ls_tree_lines(out: &str) -> Vec<TreeEntry> {
     let mut entries = Vec::new();
     for line in out.lines() {
         let Some((meta, path)) = line.split_once('\t') else {
@@ -131,10 +140,25 @@ pub fn ls_tree(git: &Path, ctx: &RepoContext, treeish: &str) -> Result<Vec<TreeE
             });
         }
     }
-    Ok(entries)
+    entries
 }
 
-#[derive(Debug, Serialize)]
+pub fn ls_tree(git: &Path, ctx: &RepoContext, treeish: &str) -> Result<Vec<TreeEntry>, GitError> {
+    let c = ctx.root.to_string_lossy();
+    let out = run_git(
+        git,
+        &[
+            "-C".into(),
+            c.to_string(),
+            "ls-tree".into(),
+            "-r".into(),
+            treeish.to_string(),
+        ],
+    )?;
+    Ok(parse_ls_tree_lines(&out))
+}
+
+#[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CommitSummary {
     pub id: String,
@@ -293,6 +317,103 @@ pub fn last_commit_for_path(
         ],
     )?;
     Ok(out.lines().next().and_then(parse_commit_line))
+}
+
+fn path_spec_touched_by_log_line(path_spec: &str, changed_path: &str) -> bool {
+    let changed_path = changed_path.trim();
+    if changed_path.is_empty() {
+        return false;
+    }
+    if path_spec.ends_with('/') {
+        let base = path_spec.trim_end_matches('/');
+        if base.is_empty() {
+            return false;
+        }
+        changed_path == base || changed_path.starts_with(&format!("{}/", base))
+    } else {
+        changed_path == path_spec
+    }
+}
+
+const LAST_COMMIT_BATCH_CHUNK: usize = 100;
+const LAST_COMMIT_BATCH_LOG_MAX: u32 = 100_000;
+
+pub fn last_commits_for_paths(
+    git: &Path,
+    ctx: &RepoContext,
+    rev: &str,
+    paths: &[String],
+) -> Result<Vec<(String, Option<CommitSummary>)>, GitError> {
+    if paths.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let c = ctx.root.to_string_lossy();
+    let mut combined = Vec::with_capacity(paths.len());
+
+    for chunk in paths.chunks(LAST_COMMIT_BATCH_CHUNK) {
+        let mut found: std::collections::HashMap<String, CommitSummary> =
+            std::collections::HashMap::new();
+
+        let mut args: Vec<String> = vec![
+            "-C".into(),
+            c.to_string(),
+            "log".into(),
+            "-n".into(),
+            LAST_COMMIT_BATCH_LOG_MAX.to_string(),
+            "--format=%H%x09%s%x09%an%x09%ct".into(),
+            "--name-only".into(),
+            rev.to_string(),
+            "--".into(),
+        ];
+        for p in chunk {
+            args.push(p.clone());
+        }
+
+        let stdout = run_git(git, &args)?;
+        let mut current: Option<CommitSummary> = None;
+
+        for line in stdout.lines() {
+            if found.len() == chunk.len() {
+                break;
+            }
+            let line = line.trim_end();
+            if line.is_empty() {
+                continue;
+            }
+            if let Some(cs) = parse_commit_line(line) {
+                current = Some(cs);
+                continue;
+            }
+            let changed = line.trim();
+            if changed.is_empty() {
+                continue;
+            }
+            let Some(ref cur) = current else {
+                continue;
+            };
+            let to_add: Vec<String> = chunk
+                .iter()
+                .filter(|p| !found.contains_key(*p))
+                .filter(|p| path_spec_touched_by_log_line(p, changed))
+                .cloned()
+                .collect();
+            for p in to_add {
+                found.insert(p, cur.clone());
+            }
+        }
+
+        for p in chunk {
+            let commit = if let Some(cs) = found.get(p) {
+                Some(cs.clone())
+            } else {
+                last_commit_for_path(git, ctx, rev, p)?
+            };
+            combined.push((p.clone(), commit));
+        }
+    }
+
+    Ok(combined)
 }
 
 #[derive(Debug, Serialize)]

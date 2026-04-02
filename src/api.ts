@@ -1,4 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
+import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 
 export type RepoRecord = {
   id: number;
@@ -80,6 +81,32 @@ export async function hubCloneRepo(
   return invoke("hub_clone_repo", { url, dest_parent: destParent ?? null });
 }
 
+export type CloneProgressPayload = { sessionId: string; line: string };
+export type CloneDonePayload = { sessionId: string; ok: boolean; error: string | null };
+
+export async function hubCloneRepoStream(
+  url: string,
+  destParent?: string | null,
+): Promise<string> {
+  return invoke("hub_clone_repo_stream", { url, dest_parent: destParent ?? null });
+}
+
+export async function hubCancelClone(sessionId: string): Promise<void> {
+  return invoke("hub_cancel_clone", { session_id: sessionId });
+}
+
+export function onCloneProgress(
+  cb: (payload: CloneProgressPayload) => void,
+): Promise<UnlistenFn> {
+  return listen<CloneProgressPayload>("clone-progress", (e) => cb(e.payload));
+}
+
+export function onCloneDone(
+  cb: (payload: CloneDonePayload) => void,
+): Promise<UnlistenFn> {
+  return listen<CloneDonePayload>("clone-done", (e) => cb(e.payload));
+}
+
 export async function hubRemoveRepo(id: number): Promise<void> {
   return invoke("hub_remove_repo", { id });
 }
@@ -139,6 +166,13 @@ export async function repoLsTree(
   rev?: string,
 ): Promise<TreeEntry[]> {
   return invoke("repo_ls_tree", { id, rev });
+}
+
+export async function repoWarmTreeCache(
+  id: number,
+  rev?: string,
+): Promise<void> {
+  return invoke("repo_warm_tree_cache", { id, rev });
 }
 
 export type RefLists = {
