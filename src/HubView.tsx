@@ -42,10 +42,22 @@ export function HubView({
   repoRoot,
   refreshToken,
 }: Props) {
+  const APP_REPO_ROOT_KEY = "deskvio-repo-root";
+  function getEffectiveRepoRoot() {
+    const stored =
+      typeof window !== "undefined" ? localStorage.getItem(APP_REPO_ROOT_KEY) ?? "" : "";
+    // Priority: in-memory setting -> persisted setting -> empty (falls back to backend default).
+    return repoRoot.trim() || stored.trim();
+  }
+
   const [repos, setRepos] = useState<RepoRecord[]>([]);
   const [query, setQuery] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  const busyRef = useRef(false);
+  useEffect(() => {
+    busyRef.current = busy;
+  }, [busy]);
   const [notice, setNotice] = useState<string | null>(null);
   const [moreOpen, setMoreOpen] = useState(false);
   const [sortMode, setSortMode] = useState<SortMode>("created_desc");
@@ -59,6 +71,8 @@ export function HubView({
   const cloneLogRef = useRef<HTMLPreElement>(null);
   const moreRef = useRef<HTMLDivElement>(null);
   const listRef = useRef<HTMLUListElement>(null);
+  // Avoid repeatedly scanning the same root during incidental re-renders/refreshes.
+  const lastScannedRepoRootRef = useRef<string>(getEffectiveRepoRoot());
   const [effectiveColumns, setEffectiveColumns] = useState<number>(1);
   const isZh = locale === "zh-CN";
   const sortOptions = isZh
@@ -144,15 +158,28 @@ export function HubView({
   const refresh = useCallback(async () => {
     setError(null);
     try {
-      const list =
-        query.trim() === ""
-          ? await hubListRepos()
-          : await hubSearch(query.trim());
+      if (query.trim() === "") {
+        const nextRoot = getEffectiveRepoRoot().trim();
+        if (nextRoot.length > 0 && nextRoot !== lastScannedRepoRootRef.current && !busyRef.current) {
+          setBusy(true);
+          try {
+            await hubScanDirectory(nextRoot, 12);
+            lastScannedRepoRootRef.current = nextRoot;
+          } finally {
+            setBusy(false);
+          }
+        }
+        const list = await hubListRepos();
+        setRepos(list);
+        return;
+      }
+
+      const list = await hubSearch(query.trim());
       setRepos(list);
     } catch (e) {
       setError(String(e));
     }
-  }, [query]);
+  }, [query, repoRoot]);
 
   useEffect(() => {
     void refresh();
@@ -259,7 +286,11 @@ export function HubView({
 
   async function pickAddRepo() {
     setError(null);
-    const dir = await open({ directory: true, multiple: false, defaultPath: repoRoot || resolvedDefaultRoot || undefined });
+    const dir = await open({
+      directory: true,
+      multiple: false,
+      defaultPath: getEffectiveRepoRoot() || resolvedDefaultRoot || undefined,
+    });
     if (dir === null || Array.isArray(dir)) return;
     setBusy(true);
     try {
@@ -274,7 +305,11 @@ export function HubView({
 
   async function pickScan() {
     setError(null);
-    const dir = await open({ directory: true, multiple: false, defaultPath: repoRoot || resolvedDefaultRoot || undefined });
+    const dir = await open({
+      directory: true,
+      multiple: false,
+      defaultPath: getEffectiveRepoRoot() || resolvedDefaultRoot || undefined,
+    });
     if (dir === null || Array.isArray(dir)) return;
     setBusy(true);
     try {
@@ -313,7 +348,7 @@ export function HubView({
     if (file === null || Array.isArray(file)) return;
     setBusy(true);
     try {
-      await importZip(file, repoRoot || null);
+      await importZip(file, getEffectiveRepoRoot() || null);
       await refresh();
     } catch (e) {
       setError(String(e));
@@ -330,7 +365,7 @@ export function HubView({
     setCloneResult(null);
     setBusy(true);
     try {
-      const sid = await hubCloneRepoStream(url, repoRoot || null);
+      const sid = await hubCloneRepoStream(url, getEffectiveRepoRoot() || null);
       setCloneSessionId(sid);
     } catch (e) {
       setError(String(e));
@@ -510,7 +545,7 @@ export function HubView({
           />
           <p className="settings-note">
             {isZh ? "落地目录：" : "Destination root: "}
-            <code>{repoRoot || resolvedDefaultRoot || (isZh ? "默认" : "default")}</code>
+              <code>{getEffectiveRepoRoot() || resolvedDefaultRoot || (isZh ? "默认" : "default")}</code>
           </p>
           {cloneLog.length > 0 && (
             <pre ref={cloneLogRef} className="hub-clone-log">{cloneLog.join("\n")}</pre>
