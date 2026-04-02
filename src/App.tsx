@@ -1,10 +1,10 @@
-import { useLayoutEffect, useState } from "react";
+import { useLayoutEffect, useRef, useState } from "react";
+import { open } from "@tauri-apps/plugin-dialog";
 import {
-  hubDefaultRepoRoot,
-  hubLegacyRepoRoot,
   hubListRepos,
   hubRemoveRepo,
   hubUnlinkRepo,
+  appDbStatus,
   type RepoRecord,
 } from "./api";
 import { HelpView } from "./HelpView";
@@ -19,7 +19,6 @@ const APP_LOCALE_KEY = "deskvio-locale";
 const APP_MOTION_KEY = "deskvio-motion-enabled";
 const APP_REPO_ROOT_KEY = "deskvio-repo-root";
 const APP_REPO_ROOT_ONBOARDING_KEY = "deskvio-repo-root-onboarding-v2";
-const APP_REPO_ROOT_MIGRATION_KEY = "deskvio-repo-root-migration-v2";
 const APP_SIDEBAR_COLLAPSED_KEY = "deskvio-sidebar-collapsed";
 
 type Theme = "light" | "dark";
@@ -91,13 +90,12 @@ function App() {
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [hubRefreshToken, setHubRefreshToken] = useState(0);
   const [repoRoot, setRepoRoot] = useState<string>(() => readStoredRepoRoot());
-  const [defaultRepoRoot, setDefaultRepoRoot] = useState<string>("");
   const [showRepoRootOnboarding, setShowRepoRootOnboarding] = useState(false);
-  const [showRepoRootMigration, setShowRepoRootMigration] = useState(false);
   const [sidebarCollapsed, setSidebarCollapsed] = useState<boolean>(() =>
     readStoredSidebarCollapsed(),
   );
   const [notice, setNotice] = useState<InlineNotice | null>(null);
+  const noticeTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const [resetProgress, setResetProgress] = useState<ResetProgress | null>(null);
   const [resetSummary, setResetSummary] = useState<ResetProgress | null>(null);
 
@@ -128,35 +126,47 @@ function App() {
   }, [sidebarCollapsed]);
 
   useLayoutEffect(() => {
-    let cancelled = false;
-    void (async () => {
-      try {
-        const [nextDefault, legacyDefault] = await Promise.all([
-          hubDefaultRepoRoot(),
-          hubLegacyRepoRoot(),
-        ]);
-        if (cancelled) return;
-        setDefaultRepoRoot(nextDefault);
-        const savedRoot = readStoredRepoRoot().trim();
-        const onboarded = localStorage.getItem(APP_REPO_ROOT_ONBOARDING_KEY) === "done";
-        const migrationHandled = localStorage.getItem(APP_REPO_ROOT_MIGRATION_KEY) === "done";
-
-        if (!onboarded && savedRoot.length === 0) {
-          setShowRepoRootOnboarding(true);
-          return;
-        }
-        if (!migrationHandled && savedRoot.length > 0 && savedRoot === legacyDefault && savedRoot !== nextDefault) {
-          setShowRepoRootMigration(true);
-        }
-      } catch {
-      }
-    })();
-    return () => {
-      cancelled = true;
-    };
+    const savedRoot = readStoredRepoRoot().trim();
+    const onboarded = localStorage.getItem(APP_REPO_ROOT_ONBOARDING_KEY) === "done";
+    if (!onboarded && savedRoot.length === 0) setShowRepoRootOnboarding(true);
   }, []);
 
   const isZh = locale === "zh-CN";
+
+  useLayoutEffect(() => {
+    void (async () => {
+      try {
+        const st = await appDbStatus();
+        if (st.status === "ok") return;
+        setNotice({
+          tone: "info",
+          text:
+            st.status === "temp"
+              ? isZh
+                ? "数据库不可写，已切换到临时数据库。重启后可能丢失仓库列表/缓存。"
+                : "Database is not writable; switched to a temporary database. Repo list/cache may be lost after restart."
+              : isZh
+                ? "检测到数据库不可写，已尝试自动修复/重建。重启后可能丢失仓库列表/缓存。"
+                : "Database is not writable; attempted auto repair/rebuild. Repo list/cache may be lost after restart.",
+        });
+      } catch {
+      }
+    })();
+  }, [isZh]);
+
+  useLayoutEffect(() => {
+    if (!notice) return;
+    if (notice.tone === "error") return;
+
+    if (noticeTimeoutRef.current) clearTimeout(noticeTimeoutRef.current);
+    noticeTimeoutRef.current = setTimeout(() => setNotice(null), 8000);
+
+    return () => {
+      if (noticeTimeoutRef.current) clearTimeout(noticeTimeoutRef.current);
+      noticeTimeoutRef.current = null;
+    };
+  }, [notice]);
+
   const labels = isZh
     ? {
         hub: "门户",
@@ -180,41 +190,27 @@ function App() {
 
   const onboardingLabels = isZh
     ? {
-        title: "设置默认仓库目录",
-        desc: "建议使用可见目录作为默认根目录，后续克隆与 ZIP 导入会默认落在这里。",
-        defaultPath: "建议目录",
-        useDefault: "使用默认目录",
-        skip: "暂不设置",
-        migrationTitle: "迁移默认仓库目录",
-        migrationDesc: "检测到你仍在使用旧的应用数据目录。是否迁移到新的可见默认目录？",
-        keepCurrent: "保留当前目录",
-        migrateNow: "迁移到新默认目录",
+        title: "指定仓库根目录",
+        desc: "你需要先选择一个可见目录。之后克隆与 ZIP 导入会落在这里。",
       }
     : {
-        title: "Set default repository root",
-        desc: "We recommend a visible folder as the default root for future clones and ZIP imports.",
-        defaultPath: "Recommended path",
-        useDefault: "Use default",
-        skip: "Skip for now",
-        migrationTitle: "Migrate repository root",
-        migrationDesc:
-          "You are currently using the legacy app-data directory. Move to the new visible default root?",
-        keepCurrent: "Keep current root",
-        migrateNow: "Migrate to new default",
+        title: "Choose repository root",
+        desc: "Select a visible directory first. Future clones and ZIP imports will land here.",
       };
 
-  function completeRepoRootOnboarding(nextRoot?: string) {
-    if (nextRoot) setRepoRoot(nextRoot);
-    localStorage.setItem(APP_REPO_ROOT_ONBOARDING_KEY, "done");
-    setShowRepoRootOnboarding(false);
+  async function pickRepoRoot(): Promise<string | null> {
+    const dir = await open({ directory: true, multiple: false });
+    if (dir === null || Array.isArray(dir)) return null;
+    const next = dir.trim();
+    return next.length > 0 ? next : null;
   }
 
-  function completeRepoRootMigration(shouldMigrate: boolean) {
-    if (shouldMigrate && defaultRepoRoot.trim().length > 0) {
-      setRepoRoot(defaultRepoRoot);
-    }
-    localStorage.setItem(APP_REPO_ROOT_MIGRATION_KEY, "done");
-    setShowRepoRootMigration(false);
+  async function confirmRepoRootOnboarding() {
+    const nextRoot = await pickRepoRoot();
+    if (!nextRoot) return;
+    setRepoRoot(nextRoot);
+    localStorage.setItem(APP_REPO_ROOT_ONBOARDING_KEY, "done");
+    setShowRepoRootOnboarding(false);
   }
 
   async function runHubReset(mode: ResetMode) {
@@ -431,9 +427,12 @@ function App() {
         onToggleTheme={() => setTheme((t) => (t === "dark" ? "light" : "dark"))}
         onMotionEnabledChange={setMotionEnabled}
         onRepoRootChange={setRepoRoot}
-        onResetRepoRoot={() =>
-          void hubDefaultRepoRoot().then((p) => setRepoRoot(p))
-        }
+        onResetRepoRoot={() => {
+          void (async () => {
+            const nextRoot = await pickRepoRoot();
+            if (nextRoot) setRepoRoot(nextRoot);
+          })();
+        }}
         onResetUnlinkOnly={resetHubUnlinkOnly}
         onResetDeleteAll={resetHubDeleteAll}
         resetProgress={resetProgress}
@@ -447,42 +446,13 @@ function App() {
             </header>
             <section className="settings-card">
               <p className="settings-note">{onboardingLabels.desc}</p>
-              <p className="settings-note">
-                {onboardingLabels.defaultPath}: <code>{defaultRepoRoot || "-"}</code>
-              </p>
               <div className="settings-confirm-actions">
                 <button
                   type="button"
                   className="btn-primary"
-                  onClick={() => completeRepoRootOnboarding(defaultRepoRoot)}
+                  onClick={() => void confirmRepoRootOnboarding()}
                 >
-                  {onboardingLabels.useDefault}
-                </button>
-                <button type="button" className="btn-secondary" onClick={() => completeRepoRootOnboarding()}>
-                  {onboardingLabels.skip}
-                </button>
-              </div>
-            </section>
-          </section>
-        </div>
-      )}
-      {showRepoRootMigration && (
-        <div className="settings-modal-backdrop" role="presentation">
-          <section className="settings-modal app-onboarding-modal" role="dialog" aria-modal="true">
-            <header className="settings-modal-head">
-              <h2>{onboardingLabels.migrationTitle}</h2>
-            </header>
-            <section className="settings-card">
-              <p className="settings-note">{onboardingLabels.migrationDesc}</p>
-              <p className="settings-note">
-                {onboardingLabels.defaultPath}: <code>{defaultRepoRoot || "-"}</code>
-              </p>
-              <div className="settings-confirm-actions">
-                <button type="button" className="btn-primary" onClick={() => completeRepoRootMigration(true)}>
-                  {onboardingLabels.migrateNow}
-                </button>
-                <button type="button" className="btn-secondary" onClick={() => completeRepoRootMigration(false)}>
-                  {onboardingLabels.keepCurrent}
+                  {isZh ? "选择目录" : "Select directory"}
                 </button>
               </div>
             </section>

@@ -196,8 +196,135 @@ fn assert_unique_release_versions(entries: &[ReleaseEntry]) -> Result<(), String
 }
 fn app_data_root() -> Result<PathBuf, String> {
     directories::ProjectDirs::from("com", "wildchiken", "Deskvio")
+        .map(|p| p.data_local_dir().to_path_buf())
+        .ok_or_else(|| "could not resolve application data directory".to_string())
+}
+
+fn best_effort_make_dir_writable(dir: &Path) {
+    #[cfg(unix)]
+    {
+        let _ = std::process::Command::new("chflags")
+            .args(["-R", "nouchg", dir.to_string_lossy().as_ref()])
+            .output();
+        let _ = std::process::Command::new("chmod")
+            .args(["-R", "u+rwX", dir.to_string_lossy().as_ref()])
+            .output();
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = dir;
+    }
+}
+
+fn open_db_with_repair(db_path: &Path, app_dir: &Path) -> Result<(Database, DbStatusInfo), String> {
+    if let Ok(db) = Database::open(db_path) {
+        return Ok((
+            db,
+            DbStatusInfo {
+                status: DbRepairStatus::Ok,
+                db_path: db_path.to_string_lossy().to_string(),
+            },
+        ));
+    }
+
+    best_effort_make_dir_writable(app_dir);
+
+    if db_path.exists() {
+        let file_name = db_path
+            .file_name()
+            .map(|s| s.to_string_lossy().to_string())
+            .unwrap_or_else(|| "hub.db".to_string());
+        let backup = db_path.with_file_name(format!("{}.bak.{}", file_name, Uuid::new_v4().simple()));
+        let _ = std::fs::rename(db_path, backup);
+    }
+
+    match Database::open(db_path) {
+        Ok(db) => Ok((
+            db,
+            DbStatusInfo {
+                status: DbRepairStatus::Repaired,
+                db_path: db_path.to_string_lossy().to_string(),
+            },
+        )),
+        Err(e) => {
+            let tmp_root = std::env::temp_dir()
+                .join("deskvio")
+                .join(format!("db-{}", Uuid::new_v4().simple()));
+            std::fs::create_dir_all(&tmp_root).map_err(|_| e.to_string())?;
+            let tmp_db = tmp_root.join("hub.db");
+            let db = Database::open(&tmp_db).map_err(|_| e.to_string())?;
+            Ok((
+                db,
+                DbStatusInfo {
+                    status: DbRepairStatus::Temp,
+                    db_path: tmp_db.to_string_lossy().to_string(),
+                },
+            ))
+        }
+    }
+}
+
+fn legacy_joined_app_data_root() -> Result<PathBuf, String> {
+    directories::ProjectDirs::from("com", "wildchiken", "Deskvio")
         .map(|p| p.data_local_dir().join("deskvio"))
         .ok_or_else(|| "could not resolve application data directory".to_string())
+}
+
+fn migrate_legacy_joined_app_data_root(new_root: &Path) -> Result<(), String> {
+    let old_root = legacy_joined_app_data_root()?;
+    if old_root == new_root {
+        return Ok(());
+    }
+
+    let new_db = new_root.join("hub.db");
+    if new_db.exists() {
+        return Ok(());
+    }
+
+    let old_db = old_root.join("hub.db");
+    if !old_db.exists() {
+        return Ok(());
+    }
+
+    if !new_root.exists() {
+        if let Some(parent) = new_root.parent() {
+            std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+        }
+        match std::fs::rename(&old_root, new_root) {
+            Ok(()) => return Ok(()),
+            Err(_) => {
+                std::fs::create_dir_all(new_root).map_err(|e| e.to_string())?;
+            }
+        }
+    }
+
+    let new_db_path = new_root.join("hub.db");
+    if !new_db_path.exists() {
+        std::fs::rename(&old_db, &new_db_path).or_else(|_| {
+            std::fs::copy(&old_db, &new_db_path).map_err(|e| e.to_string())?;
+            std::fs::remove_file(&old_db).map_err(|e| e.to_string())
+        }).map_err(|e| e.to_string())?;
+    }
+
+    let old_repos = old_root.join("repositories");
+    let new_repos = new_root.join("repositories");
+    if old_repos.exists() && !new_repos.exists() {
+        if let Err(_) = std::fs::rename(&old_repos, &new_repos) {
+            std::fs::create_dir_all(&new_repos).map_err(|e| e.to_string())?;
+            for entry in std::fs::read_dir(&old_repos).map_err(|e| e.to_string())? {
+                let entry = entry.map_err(|e| e.to_string())?;
+                let src = entry.path();
+                let dst = new_repos.join(entry.file_name());
+                if src.is_dir() {
+                    std::fs::rename(&src, &dst).map_err(|e| e.to_string())?;
+                } else {
+                    std::fs::copy(&src, &dst).map_err(|e| e.to_string())?;
+                }
+            }
+        }
+    }
+
+    Ok(())
 }
 
 fn legacy_app_data_roots() -> Vec<PathBuf> {
@@ -239,37 +366,6 @@ fn migrate_legacy_app_data(new_root: &Path) -> Result<(), String> {
     Ok(())
 }
 
-fn legacy_repo_root() -> Result<PathBuf, String> {
-    let root = app_data_root()?.join("repositories");
-    std::fs::create_dir_all(&root).map_err(|e| e.to_string())?;
-    Ok(root)
-}
-
-fn visible_repo_root_candidate() -> Option<PathBuf> {
-    directories::BaseDirs::new()
-        .map(|b| b.home_dir().join("Deskvio"))
-}
-
-fn ensure_writable_dir(path: &Path) -> Result<(), String> {
-    std::fs::create_dir_all(path).map_err(|e| e.to_string())?;
-    let meta = std::fs::metadata(path).map_err(|e| e.to_string())?;
-    if meta.permissions().readonly() {
-        return Err("directory is read-only".to_string());
-    }
-    Ok(())
-}
-
-fn default_repo_root() -> Result<PathBuf, String> {
-    if let Some(visible_root) = visible_repo_root_candidate() {
-        if ensure_writable_dir(&visible_root).is_ok() {
-            return Ok(visible_root);
-        }
-    }
-    let fallback = legacy_repo_root()?;
-    ensure_writable_dir(&fallback)?;
-    Ok(fallback)
-}
-
 const MAX_ZIP_ENTRIES: usize = 20_000;
 const MAX_ZIP_TOTAL_UNPACKED_BYTES: u64 = 1_000_000_000;
 const MAX_ZIP_SINGLE_FILE_BYTES: u64 = 256_000_000;
@@ -286,10 +382,111 @@ fn looks_like_git_repo_dir(path: &Path) -> bool {
         || (path.join("HEAD").is_file() && path.join("objects").is_dir())
 }
 
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+enum DbRepairStatus {
+    Ok,
+    Repaired,
+    Temp,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct DbStatusInfo {
+    status: DbRepairStatus,
+    db_path: String,
+}
+
 pub struct AppState {
     db: Mutex<Database>,
+    db_status: DbStatusInfo,
     git_bin: PathBuf,
-    clone_pids: Mutex<std::collections::HashMap<String, u32>>,
+    clone_sessions: Mutex<std::collections::HashMap<String, CloneSession>>,
+}
+
+#[derive(Clone)]
+struct CloneSession {
+    pid: u32,
+    cancelled: bool,
+    target: PathBuf,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct CancelCloneResult {
+    session_id: String,
+    target: String,
+    killed: bool,
+    removed: bool,
+    still_exists: bool,
+    error: Option<String>,
+}
+
+fn best_effort_remove_dir_all(path: &Path) {
+    if !path.exists() {
+        return;
+    }
+    if !path.is_absolute() {
+        return;
+    }
+    if path.parent().is_none() {
+        return;
+    }
+
+    let max_attempts = 60;
+    let mut last_err: Option<String> = None;
+    for attempt in 0..max_attempts {
+        #[cfg(unix)]
+        {
+            let _ = std::process::Command::new("chflags")
+                .args(["-R", "nouchg", path.to_string_lossy().as_ref()])
+                .output();
+            let _ = std::process::Command::new("chmod")
+                .args(["-R", "u+rwX", path.to_string_lossy().as_ref()])
+                .output();
+        }
+
+        match fs::remove_dir_all(path) {
+            Ok(_) => {
+                println!(
+                    "[clone-cleanup] removed '{}' after {} attempts",
+                    path.display(),
+                    attempt + 1
+                );
+                return;
+            }
+            Err(e) => {
+                if !path.exists() {
+                    println!(
+                        "[clone-cleanup] target '{}' disappeared (attempt {})",
+                        path.display(),
+                        attempt + 1
+                    );
+                    return;
+                }
+                last_err = Some(e.to_string());
+                if attempt + 1 < max_attempts {
+                    let ms = (120u64 * (attempt as u64 + 1)).min(1500);
+                    std::thread::sleep(std::time::Duration::from_millis(ms));
+                } else {
+                }
+            }
+        }
+    }
+
+    if path.exists() {
+        println!(
+            "[clone-cleanup] failed to remove '{}' after {} attempts: {}",
+            path.display(),
+            max_attempts,
+            last_err.unwrap_or_else(|| "unknown error".to_string())
+        );
+    } else {
+        println!(
+            "[clone-cleanup] removed '{}' (exists check said missing after retries)",
+            path.display()
+        );
+    }
 }
 
 fn map_git_err(e: GitError) -> String {
@@ -335,6 +532,11 @@ fn scan_directory_inner(
 fn hub_list_repos(state: tauri::State<'_, AppState>) -> Result<Vec<RepoRecord>, String> {
     let db = state.db.lock().map_err(|e| e.to_string())?;
     db.list_all().map_err(map_db_err)
+}
+
+#[tauri::command]
+fn app_db_status(state: tauri::State<'_, AppState>) -> Result<DbStatusInfo, String> {
+    Ok(state.db_status.clone())
 }
 
 #[tauri::command]
@@ -386,14 +588,12 @@ fn hub_add_repo(state: tauri::State<'_, AppState>, path: String) -> Result<RepoR
 
 #[tauri::command]
 fn hub_default_repo_root() -> Result<String, String> {
-    let root = default_repo_root()?;
-    Ok(root.to_string_lossy().to_string())
+    Err("repo root is not set; please choose a destination directory first".to_string())
 }
 
 #[tauri::command]
 fn hub_legacy_repo_root() -> Result<String, String> {
-    let root = legacy_repo_root()?;
-    Ok(root.to_string_lossy().to_string())
+    Err("repo root is not set; please choose a destination directory first".to_string())
 }
 
 #[tauri::command]
@@ -406,15 +606,17 @@ fn hub_clone_repo(
     if !url.starts_with("https://") {
         return Err("only public https clone URLs are supported".into());
     }
-    let base = if let Some(dest) = dest_parent {
-        let p = PathBuf::from(dest.trim());
-        if p.as_os_str().is_empty() {
-            default_repo_root()?
-        } else {
-            p
+    let base = match dest_parent {
+        Some(dest) => {
+            let trimmed = dest.trim();
+            if trimmed.is_empty() {
+                return Err("repo root is not set; please choose a destination directory first".to_string());
+            }
+            PathBuf::from(trimmed)
         }
-    } else {
-        default_repo_root()?
+        None => {
+            return Err("repo root is not set; please choose a destination directory first".to_string());
+        }
     };
     fs::create_dir_all(&base).map_err(|e| e.to_string())?;
 
@@ -453,11 +655,17 @@ fn hub_clone_repo(
 }
 
 fn compute_clone_dest(url: &str, dest_parent: Option<String>) -> Result<PathBuf, String> {
-    let base = if let Some(dest) = dest_parent {
-        let p = PathBuf::from(dest.trim());
-        if p.as_os_str().is_empty() { default_repo_root()? } else { p }
-    } else {
-        default_repo_root()?
+    let base = match dest_parent {
+        Some(dest) => {
+            let trimmed = dest.trim();
+            if trimmed.is_empty() {
+                return Err("repo root is not set; please choose a destination directory first".to_string());
+            }
+            PathBuf::from(trimmed)
+        }
+        None => {
+            return Err("repo root is not set; please choose a destination directory first".to_string());
+        }
     };
     fs::create_dir_all(&base).map_err(|e| e.to_string())?;
     let mut name = url.rsplit('/').next().unwrap_or("repo").trim().trim_end_matches(".git").to_string();
@@ -495,8 +703,18 @@ fn hub_clone_repo_stream(
 
     let pid = child.id();
     {
-        let mut pids = state.clone_pids.lock().map_err(|e| e.to_string())?;
-        pids.insert(session_id.clone(), pid);
+        let mut sessions = state
+            .clone_sessions
+            .lock()
+            .map_err(|e| e.to_string())?;
+        sessions.insert(
+            session_id.clone(),
+            CloneSession {
+                pid,
+                cancelled: false,
+                target: target.clone(),
+            },
+        );
     }
 
     let sid = session_id.clone();
@@ -538,11 +756,25 @@ fn hub_clone_repo_stream(
             }
         }
         let status = child.wait();
-        if let Ok(mut pids) = app.state::<AppState>().clone_pids.lock() {
-            pids.remove(&sid);
+        let mut session_was_present = false;
+        let mut was_cancelled = false;
+        if let Ok(mut sessions) = app.state::<AppState>().clone_sessions.lock() {
+            if let Some(s) = sessions.remove(&sid) {
+                session_was_present = true;
+                was_cancelled = s.cancelled;
+            }
         }
         match status {
             Ok(s) if s.success() => {
+                if was_cancelled {
+                    best_effort_remove_dir_all(&target);
+                    let _ = app.emit("clone-done", serde_json::json!({
+                        "sessionId": &sid,
+                        "ok": false,
+                        "error": "cancelled",
+                    }));
+                    return;
+                }
                 let reg = (|| -> Result<RepoRecord, String> {
                     let st = app.state::<AppState>();
                     let canon = target.canonicalize().map_err(|e| e.to_string())?;
@@ -566,6 +798,9 @@ fn hub_clone_repo_stream(
                     "ok": false,
                     "error": format!("git clone exited with {}", s),
                 }));
+                if session_was_present {
+                    best_effort_remove_dir_all(&target);
+                }
             }
             Err(e) => {
                 let _ = app.emit("clone-done", serde_json::json!({
@@ -573,6 +808,9 @@ fn hub_clone_repo_stream(
                     "ok": false,
                     "error": e.to_string(),
                 }));
+                if session_was_present {
+                    best_effort_remove_dir_all(&target);
+                }
             }
         }
     });
@@ -599,12 +837,63 @@ fn kill_process_by_pid(pid: u32) {
 fn hub_cancel_clone(
     state: tauri::State<'_, AppState>,
     session_id: String,
-) -> Result<(), String> {
-    let mut pids = state.clone_pids.lock().map_err(|e| e.to_string())?;
-    if let Some(pid) = pids.remove(&session_id) {
+) -> Result<CancelCloneResult, String> {
+    let pid_opt = {
+        let mut sessions = match state.clone_sessions.lock() {
+            Ok(g) => g,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        if let Some(s) = sessions.get_mut(&session_id) {
+            s.cancelled = true;
+            let pid = s.pid;
+            let target = s.target.clone();
+            Some((pid, target))
+        } else {
+            None
+        }
+    };
+
+    let mut killed = false;
+    let mut target_opt: Option<PathBuf> = None;
+    if let Some((pid, target)) = pid_opt {
+        killed = true;
         kill_process_by_pid(pid);
+        best_effort_remove_dir_all(&target);
+        target_opt = Some(target);
     }
-    Ok(())
+
+    let (target_str, still_exists) = if let Some(target) = target_opt {
+        let target_str = target.to_string_lossy().to_string();
+        let mut still_exists = target.exists();
+        if still_exists {
+            for _ in 0..6 {
+                std::thread::sleep(std::time::Duration::from_millis(200));
+                if !target.exists() {
+                    still_exists = false;
+                    break;
+                }
+            }
+        }
+        (target_str, still_exists)
+    } else {
+        ("".to_string(), false)
+    };
+
+    let removed = if target_str.is_empty() { false } else { !still_exists };
+    let error = if target_str.is_empty() {
+        Some("clone session not found".to_string())
+    } else {
+        None
+    };
+
+    Ok(CancelCloneResult {
+        session_id,
+        target: target_str,
+        killed,
+        removed,
+        still_exists,
+        error,
+    })
 }
 
 #[tauri::command]
@@ -1161,20 +1450,22 @@ fn import_zip(
         return Err("zip file not found".into());
     }
 
-    let base_dest = if let Some(p) = dest_parent {
-        let trimmed = p.trim();
-        if trimmed.is_empty() {
-            default_repo_root()?
-        } else {
-            PathBuf::from(trimmed)
+    let base_dest = match dest_parent {
+        Some(p) => {
+            let trimmed = p.trim();
+            if trimmed.is_empty() {
+                return Err("repo root is not set; please choose a destination directory first".to_string());
+            }
+            let dir = PathBuf::from(trimmed);
+            let ts = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .map(|d| d.as_millis())
+                .unwrap_or(0);
+            dir.join(format!("import-{}", ts))
         }
-    } else {
-        let dir = default_repo_root()?;
-        let ts = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map(|d| d.as_millis())
-            .unwrap_or(0);
-        dir.join(format!("import-{}", ts))
+        None => {
+            return Err("repo root is not set; please choose a destination directory first".to_string());
+        }
     };
 
     fs::create_dir_all(&base_dest).map_err(|e| e.to_string())?;
@@ -1239,11 +1530,62 @@ fn import_zip(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::Write;
 
     #[test]
     fn zip_depth_counts_components() {
         assert_eq!(zip_path_depth(Path::new("a/b/c")), 3);
         assert_eq!(zip_path_depth(Path::new("readme.md")), 1);
+    }
+
+    #[test]
+    fn open_db_with_repair_returns_ok_when_db_missing() {
+        let tmp_root = std::env::temp_dir().join(format!("deskvio-db-ok-{}", Uuid::new_v4()));
+        let app_dir = tmp_root.join("app");
+        fs::create_dir_all(&app_dir).expect("mkdir app_dir");
+        let db_path = app_dir.join("hub.db");
+        assert!(!db_path.exists());
+
+        let (_db, st) = open_db_with_repair(&db_path, &app_dir).expect("open db");
+        assert!(matches!(st.status, DbRepairStatus::Ok));
+        assert_eq!(st.db_path, db_path.to_string_lossy().to_string());
+
+        let db2 = Database::open(&db_path).expect("db open after repair");
+        assert!(db2.list_all().expect("list").is_empty());
+
+        let _ = fs::remove_dir_all(&tmp_root);
+    }
+
+    #[test]
+    fn open_db_with_repair_returns_repaired_when_db_corrupt() {
+        let tmp_root = std::env::temp_dir().join(format!(
+            "deskvio-db-corrupt-{}",
+            Uuid::new_v4()
+        ));
+        let app_dir = tmp_root.join("app");
+        fs::create_dir_all(&app_dir).expect("mkdir app_dir");
+        let db_path = app_dir.join("hub.db");
+
+        let mut f = fs::File::create(&db_path).expect("create corrupt db");
+        f.write_all(b"not a sqlite database").expect("write corrupt db");
+
+        let (_db, st) = open_db_with_repair(&db_path, &app_dir).expect("open db");
+        assert!(matches!(st.status, DbRepairStatus::Repaired));
+
+        let mut has_backup = false;
+        for entry in fs::read_dir(&app_dir).expect("read dir") {
+            let entry = entry.expect("entry");
+            let name = entry.file_name().to_string_lossy().to_string();
+            if name.contains(".bak.") {
+                has_backup = true;
+            }
+        }
+        assert!(has_backup, "expected a .bak. backup file");
+
+        let db2 = Database::open(&db_path).expect("db open after repair");
+        let _ = db2.list_all().expect("list");
+
+        let _ = fs::remove_dir_all(&tmp_root);
     }
 
     #[test]
@@ -1380,20 +1722,23 @@ pub fn run() {
         .plugin(tauri_plugin_dialog::init())
         .setup(|app| {
             let app_dir = app_data_root()?;
+            migrate_legacy_joined_app_data_root(&app_dir)?;
             std::fs::create_dir_all(&app_dir).map_err(|e| e.to_string())?;
             migrate_legacy_app_data(&app_dir)?;
             let db_path = app_dir.join("hub.db");
-            let db = Database::open(&db_path).map_err(|e| e.to_string())?;
+            let (db, db_status) = open_db_with_repair(&db_path, &app_dir)?;
             let git_bin = resolve_git_binary();
             app.manage(AppState {
                 db: Mutex::new(db),
+                db_status,
                 git_bin,
-                clone_pids: Mutex::new(std::collections::HashMap::new()),
+                clone_sessions: Mutex::new(std::collections::HashMap::new()),
             });
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
             hub_list_repos,
+            app_db_status,
             hub_prune_missing_repos,
             hub_search,
             hub_add_repo,

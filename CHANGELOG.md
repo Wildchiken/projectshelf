@@ -7,6 +7,12 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+## [1.1.2] - 2026-04-02
+
+### Fixed
+- Cancel clone returns deterministic cleanup status and improves partial download cleanup reliability.
+- Notice banners now auto-dismiss for `success`/`info` tones to avoid persistent UX.
+
 ## [1.1.1] - 2026-04-02
 
 ### Fixed

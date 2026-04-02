@@ -58,6 +58,15 @@ export async function hubListRepos(): Promise<RepoRecord[]> {
   return invoke("hub_list_repos");
 }
 
+export type DbStatusInfo = {
+  status: "ok" | "repaired" | "temp";
+  dbPath: string;
+};
+
+export async function appDbStatus(): Promise<DbStatusInfo> {
+  return invoke("app_db_status");
+}
+
 export async function hubPruneMissingRepos(): Promise<number> {
   return invoke("hub_prune_missing_repos");
 }
@@ -82,7 +91,6 @@ export async function hubCloneRepo(
   url: string,
   destParent?: string | null,
 ): Promise<RepoRecord> {
-  // Tauri command arg deserialization expects camelCase for JS payload.
   return invoke("hub_clone_repo", { url, destParent: destParent ?? null });
 }
 
@@ -96,8 +104,17 @@ export async function hubCloneRepoStream(
   return invoke("hub_clone_repo_stream", { url, destParent: destParent ?? null });
 }
 
-export async function hubCancelClone(sessionId: string): Promise<void> {
-  return invoke("hub_cancel_clone", { session_id: sessionId });
+export type CancelCloneResult = {
+  sessionId: string;
+  target: string;
+  killed: boolean;
+  removed: boolean;
+  stillExists: boolean;
+  error: string | null;
+};
+
+export async function hubCancelClone(sessionId: string): Promise<CancelCloneResult> {
+  return invoke("hub_cancel_clone", { sessionId });
 }
 
 export function onCloneProgress(

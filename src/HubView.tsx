@@ -12,7 +12,6 @@ import {
   hubAddRepo,
   hubCancelClone,
   hubCloneRepoStream,
-  hubDefaultRepoRoot,
   hubListRepos,
   hubPruneMissingRepos,
   hubScanDirectory,
@@ -59,19 +58,25 @@ export function HubView({
     busyRef.current = busy;
   }, [busy]);
   const [notice, setNotice] = useState<string | null>(null);
+  const noticeTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  useEffect(() => {
+    return () => {
+      if (noticeTimeoutRef.current) {
+        clearTimeout(noticeTimeoutRef.current);
+        noticeTimeoutRef.current = null;
+      }
+    };
+  }, []);
   const [moreOpen, setMoreOpen] = useState(false);
   const [sortMode, setSortMode] = useState<SortMode>("created_desc");
   const [favoritesOnly, setFavoritesOnly] = useState(false);
   const [cloneOpen, setCloneOpen] = useState(false);
   const [cloneUrl, setCloneUrl] = useState("");
-  const [cloneSessionId, setCloneSessionId] = useState<string | null>(null);
+  const [, setCloneSessionId] = useState<string | null>(null);
   const cloneSessionIdRef = useRef<string | null>(null);
-  useEffect(() => {
-    cloneSessionIdRef.current = cloneSessionId;
-  }, [cloneSessionId]);
+  const cloneCancelRequestedRef = useRef(false);
   const [cloneLog, setCloneLog] = useState<string[]>([]);
   const [cloneResult, setCloneResult] = useState<{ ok: boolean; error?: string } | null>(null);
-  const [resolvedDefaultRoot, setResolvedDefaultRoot] = useState("");
   const cloneLogRef = useRef<HTMLPreElement>(null);
   const moreRef = useRef<HTMLDivElement>(null);
   const listRef = useRef<HTMLUListElement>(null);
@@ -142,10 +147,6 @@ export function HubView({
     });
     return withIndex.map((item) => item.repo);
   }, [repos, favoritesOnly, sortMode]);
-
-  useEffect(() => {
-    void hubDefaultRepoRoot().then(setResolvedDefaultRoot).catch(() => {});
-  }, []);
 
   useEffect(() => {
     if (!moreOpen) return;
@@ -236,10 +237,9 @@ export function HubView({
     unlistens.push(
       onCloneProgress((p) => {
         const line = p.line ?? "";
-
         const sid = cloneSessionIdRef.current;
-        if (!sid && !busyRef.current) return;
-        if (sid && p.sessionId !== sid) return;
+        if (!sid) return;
+        if (p.sessionId !== sid) return;
 
         setCloneLog((prev) => {
           const next = [...prev, line];
@@ -252,13 +252,22 @@ export function HubView({
     );
     unlistens.push(
       onCloneDone((p) => {
-        const sid = cloneSessionIdRef.current;
-        if (sid && p.sessionId !== sid) return;
+        let sid = cloneSessionIdRef.current;
+        if (!sid) {
+          if (!cloneCancelRequestedRef.current && busyRef.current) {
+            sid = p.sessionId;
+            cloneSessionIdRef.current = sid;
+          } else {
+            return;
+          }
+        }
+        if (p.sessionId !== sid) return;
         setCloneResult({ ok: p.ok, error: p.error ?? undefined });
         setBusy(false);
         if (p.ok) {
           void refresh();
         }
+        cloneSessionIdRef.current = null;
         setCloneSessionId(null);
       }),
     );
@@ -300,7 +309,7 @@ export function HubView({
     const dir = await open({
       directory: true,
       multiple: false,
-      defaultPath: getEffectiveRepoRoot() || resolvedDefaultRoot || undefined,
+      defaultPath: getEffectiveRepoRoot() || undefined,
     });
     if (dir === null || Array.isArray(dir)) return;
     setBusy(true);
@@ -319,7 +328,7 @@ export function HubView({
     const dir = await open({
       directory: true,
       multiple: false,
-      defaultPath: getEffectiveRepoRoot() || resolvedDefaultRoot || undefined,
+      defaultPath: getEffectiveRepoRoot() || undefined,
     });
     if (dir === null || Array.isArray(dir)) return;
     setBusy(true);
@@ -359,7 +368,19 @@ export function HubView({
     if (file === null || Array.isArray(file)) return;
     setBusy(true);
     try {
-      await importZip(file, getEffectiveRepoRoot() || null);
+      let destParent = getEffectiveRepoRoot().trim();
+      if (!destParent) {
+        const dir = await open({
+          directory: true,
+          multiple: false,
+        });
+        if (dir === null || Array.isArray(dir)) {
+          setBusy(false);
+          return;
+        }
+        destParent = dir.trim();
+      }
+      await importZip(file, destParent);
       await refresh();
     } catch (e) {
       setError(String(e));
@@ -374,25 +395,68 @@ export function HubView({
     setError(null);
     setCloneLog([]);
     setCloneResult(null);
+    cloneCancelRequestedRef.current = false;
     setBusy(true);
     try {
-      const effectiveRoot = getEffectiveRepoRoot();
-      const sid = await hubCloneRepoStream(url, effectiveRoot || null);
+      let destParent = getEffectiveRepoRoot().trim();
+      if (!destParent) {
+        const dir = await open({
+          directory: true,
+          multiple: false,
+        });
+        if (dir === null || Array.isArray(dir)) {
+          setBusy(false);
+          return;
+        }
+        destParent = dir.trim();
+      }
+      const sid = await hubCloneRepoStream(url, destParent);
+      if (cloneCancelRequestedRef.current) {
+        await hubCancelClone(sid).catch(() => {});
+        return;
+      }
+      cloneSessionIdRef.current = sid;
       setCloneSessionId(sid);
     } catch (e) {
-      setError(String(e));
-      setBusy(false);
+      if (!cloneCancelRequestedRef.current) {
+        setError(String(e));
+        setBusy(false);
+      }
     }
   }
 
   async function cancelClone() {
-    if (cloneSessionId) {
-      await hubCancelClone(cloneSessionId);
-    }
-    setBusy(false);
+    cloneCancelRequestedRef.current = true;
+    const sid = cloneSessionIdRef.current;
+    cloneSessionIdRef.current = null;
     setCloneSessionId(null);
+    setBusy(false);
     setCloneLog([]);
     setCloneResult(null);
+    if (sid) {
+      try {
+        const r = await hubCancelClone(sid);
+        const zhText = `已取消克隆。目标：${r.target || "(未知)"}${
+          r.stillExists ? "（清理未完全成功，可能会在几秒后结束）" : "（已清理）"
+        }`;
+        const enText = `Clone cancelled. Target: ${r.target || "(unknown)"}${
+          r.stillExists ? " (cleanup not complete; may finish shortly)" : " (cleaned)"
+        }`;
+
+        const nextNotice = isZh ? zhText : enText;
+        setNotice(nextNotice);
+        if (noticeTimeoutRef.current) clearTimeout(noticeTimeoutRef.current);
+        noticeTimeoutRef.current = setTimeout(() => setNotice(null), 8000);
+      } catch (e) {
+        const msg = String(e);
+        const nextNotice = isZh
+          ? `已取消克隆（清理结果未知）：${msg}`
+          : `Clone cancelled (cleanup result unknown): ${msg}`;
+        setNotice(nextNotice);
+        if (noticeTimeoutRef.current) clearTimeout(noticeTimeoutRef.current);
+        noticeTimeoutRef.current = setTimeout(() => setNotice(null), 8000);
+      }
+    }
   }
 
   async function toggleFavorite(r: RepoRecord) {
@@ -557,7 +621,7 @@ export function HubView({
           />
           <p className="settings-note">
             {isZh ? "落地目录：" : "Destination root: "}
-              <code>{getEffectiveRepoRoot() || resolvedDefaultRoot || (isZh ? "默认" : "default")}</code>
+              <code>{getEffectiveRepoRoot().trim() || (isZh ? "未指定" : "Not set")}</code>
           </p>
           {cloneLog.length > 0 && (
             <pre ref={cloneLogRef} className="hub-clone-log">{cloneLog.join("\n")}</pre>
@@ -586,6 +650,8 @@ export function HubView({
                   setCloneUrl("");
                   setCloneLog([]);
                   setCloneResult(null);
+                  cloneCancelRequestedRef.current = false;
+                  cloneSessionIdRef.current = null;
                   setCloneSessionId(null);
                 }}
               >
