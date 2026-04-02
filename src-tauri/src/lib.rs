@@ -494,9 +494,26 @@ fn hub_clone_repo_stream(
     if !url.starts_with("https://") {
         return Err("only public https clone URLs are supported".into());
     }
+    let dest_parent_dbg = dest_parent.clone();
     let target = compute_clone_dest(&url, dest_parent)?;
     let git_bin = state.git_bin.clone();
     let session_id = Uuid::new_v4().simple().to_string();
+
+    // Helpful diagnostics for clone destination issues:
+    // We surface what backend received and what target it will use.
+    let base_dbg = target
+        .parent()
+        .map(|p| p.to_string_lossy().to_string())
+        .unwrap_or_else(|| "<unknown>".to_string());
+    let dest_dbg = dest_parent_dbg.unwrap_or_else(|| "".to_string());
+    let target_dbg = target.to_string_lossy().to_string();
+    let _ = app.emit(
+        "clone-progress",
+        serde_json::json!({
+            "sessionId": &session_id,
+            "line": format!("Debug: dest_parent='{}' => base='{}', target='{}'", dest_dbg, base_dbg, target_dbg),
+        }),
+    );
 
     let child = std::process::Command::new(&git_bin)
         .args(["clone", "--progress", "--", &url, &target.to_string_lossy()])
