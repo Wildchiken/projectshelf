@@ -5,6 +5,13 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.1.5] - 2026-04-03
+
+### Changed
+- Releases UI: list-only cards with separate middle modal for view/edit; clearer save feedback and more predictable cancel behavior.
+- Releases actions: danger styling for delete, and “reveal in folder” support for imported assets using in-repo paths.
+- Releases import: simplified to file-only selection (folder import disabled) to avoid inconsistent behavior.
+
 ## [1.1.4] - 2026-04-03
 
 ### Added

@@ -1273,6 +1273,35 @@ fn repo_save_releases(
     Ok(normalized)
 }
 
+fn import_release_file_at(
+    repo_root: &Path,
+    release_id: &str,
+    src_can: &Path,
+    display_name: String,
+) -> Result<ReleaseAsset, String> {
+    if !src_can.is_file() {
+        return Err("source file not found".into());
+    }
+    let leaf = src_can
+        .file_name()
+        .map(|x| x.to_string_lossy().to_string())
+        .unwrap_or_else(|| "asset.bin".to_string());
+    let (asset_id, rel_path, dst) = make_unique_asset_target(repo_root, release_id, &leaf);
+    if let Some(parent) = dst.parent() {
+        fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+    }
+    fs::copy(src_can, &dst).map_err(|e| e.to_string())?;
+    let meta = fs::metadata(&dst).map_err(|e| e.to_string())?;
+    Ok(ReleaseAsset {
+        id: asset_id,
+        name: display_name,
+        stored_path: rel_path,
+        original_path: src_can.to_string_lossy().to_string(),
+        size_bytes: meta.len(),
+        added_at: now_unix(),
+    })
+}
+
 #[tauri::command]
 fn repo_import_release_asset(
     state: tauri::State<'_, AppState>,
@@ -1294,24 +1323,58 @@ fn repo_import_release_asset(
         return Err("source file not found".into());
     }
     let src_can = src.canonicalize().map_err(|e| e.to_string())?;
-    let file_name = src_can
+    let display_name = src_can
         .file_name()
         .map(|x| x.to_string_lossy().to_string())
         .unwrap_or_else(|| "asset.bin".to_string());
-    let (asset_id, rel_path, dst) = make_unique_asset_target(&repo_root, &release_id, &file_name);
-    if let Some(parent) = dst.parent() {
-        fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+    import_release_file_at(&repo_root, &release_id, &src_can, display_name)
+}
+
+#[tauri::command]
+fn repo_import_release_sources(
+    state: tauri::State<'_, AppState>,
+    id: i64,
+    release_id: String,
+    source_paths: Vec<String>,
+) -> Result<Vec<ReleaseAsset>, String> {
+    let db = state.db.lock().map_err(|e| e.to_string())?;
+    let r = db
+        .get(id)
+        .map_err(map_db_err)?
+        .ok_or_else(|| "repository not found".to_string())?;
+    drop(db);
+    let repo_root = PathBuf::from(r.path)
+        .canonicalize()
+        .map_err(|e| e.to_string())?;
+    let mut all = Vec::new();
+    for raw in source_paths {
+        let raw = raw.trim();
+        if raw.is_empty() {
+            continue;
+        }
+        let p = PathBuf::from(raw);
+        if !p.exists() {
+            return Err(format!("path not found: {}", raw));
+        }
+        if p.is_dir() {
+            return Err("folders are not supported; select files only".into());
+        } else if p.is_file() {
+            let src_can = p.canonicalize().map_err(|e| e.to_string())?;
+            let display_name = src_can
+                .file_name()
+                .map(|x| x.to_string_lossy().to_string())
+                .unwrap_or_else(|| "asset.bin".to_string());
+            all.push(import_release_file_at(
+                &repo_root,
+                &release_id,
+                &src_can,
+                display_name,
+            )?);
+        } else {
+            return Err(format!("not a file or directory: {}", raw));
+        }
     }
-    fs::copy(&src_can, &dst).map_err(|e| e.to_string())?;
-    let meta = fs::metadata(&dst).map_err(|e| e.to_string())?;
-    Ok(ReleaseAsset {
-        id: asset_id,
-        name: file_name,
-        stored_path: rel_path,
-        original_path: src_can.to_string_lossy().to_string(),
-        size_bytes: meta.len(),
-        added_at: now_unix(),
-    })
+    Ok(all)
 }
 
 #[tauri::command]
@@ -1334,6 +1397,28 @@ fn repo_delete_release_asset(
         fs::remove_file(path).map_err(|e| e.to_string())?;
     }
     Ok(())
+}
+
+#[tauri::command]
+fn repo_resolve_release_asset_path(
+    state: tauri::State<'_, AppState>,
+    id: i64,
+    stored_path: String,
+) -> Result<String, String> {
+    let db = state.db.lock().map_err(|e| e.to_string())?;
+    let r = db
+        .get(id)
+        .map_err(map_db_err)?
+        .ok_or_else(|| "repository not found".to_string())?;
+    drop(db);
+    let repo_root = PathBuf::from(r.path)
+        .canonicalize()
+        .map_err(|e| e.to_string())?;
+    let path = resolve_asset_disk_path(&repo_root, &stored_path)?;
+    if !path.is_file() {
+        return Err("asset file not found".into());
+    }
+    Ok(path.to_string_lossy().to_string())
 }
 
 fn repo_ls_tree_impl(state: &AppState, id: i64, rev: Option<String>) -> Result<Vec<TreeEntry>, String> {
@@ -1952,7 +2037,9 @@ pub fn run() {
             repo_list_releases,
             repo_save_releases,
             repo_import_release_asset,
+            repo_import_release_sources,
             repo_delete_release_asset,
+            repo_resolve_release_asset_path,
             import_zip,
         ])
         .run(tauri::generate_context!())

@@ -3326,6 +3326,57 @@ html[data-theme="light"] .repo-file-name-btn.active {
   margin-bottom: 0.75rem;
 }
 
+.repo-release-notice {
+  margin-bottom: 0.65rem;
+}
+
+.repo-release-unsaved-pill {
+  font-size: 0.72rem;
+  font-weight: 700;
+  padding: 0.2rem 0.5rem;
+  border-radius: 6px;
+  background: color-mix(in srgb, var(--ios-orange, #ff9500) 22%, transparent);
+  color: var(--ios-label);
+}
+
+.repo-release-saved-note {
+  font-size: 0.78rem;
+  color: var(--ios-secondary);
+}
+
+.repo-release-field {
+  display: flex;
+  flex-direction: column;
+  gap: 0.2rem;
+  margin-bottom: 0.5rem;
+}
+
+.repo-release-field-label {
+  font-size: 0.72rem;
+  font-weight: 600;
+  color: var(--ios-tertiary);
+}
+
+.repo-release-asset-name {
+  font-weight: 600;
+  min-width: 0;
+  flex: 1 1 140px;
+}
+
+.repo-release-asset-path {
+  font-size: 0.72rem;
+  margin-top: 0.2rem;
+  margin-bottom: 0.35rem;
+  word-break: break-all;
+  line-height: 1.35;
+  color: var(--ios-secondary);
+}
+
+.repo-release-asset-path-inner {
+  color: var(--ios-label);
+  font-weight: 500;
+}
+
 .repo-release-assets {
   margin: 0;
   padding-left: 1rem;

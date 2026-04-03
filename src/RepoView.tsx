@@ -33,11 +33,12 @@ import {
   repoLog,
   repoLsTree,
   repoPathsLastCommit,
-  repoImportReleaseAsset,
+  repoImportReleaseSources,
   repoListReleases,
   repoRemotes,
   repoRevCount,
   repoDeleteReleaseAsset,
+  repoResolveReleaseAssetPath,
   repoSaveReleases,
   repoShowCommit,
   repoStage,
@@ -362,9 +363,16 @@ export function RepoView({ repo, locale = "zh-CN", onBack, onUpdateRepo, onRemov
   const [releaseDrafts, setReleaseDrafts] = useState<ReleaseEntry[]>([]);
   const [releaseSavedSnapshot, setReleaseSavedSnapshot] = useState("[]");
   const [releaseSaving, setReleaseSaving] = useState(false);
+  const [releaseNotice, setReleaseNotice] = useState<string | null>(null);
+  const releaseNoticeTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const [releaseEditorOpen, setReleaseEditorOpen] = useState(false);
+  const [releaseEditorId, setReleaseEditorId] = useState<string | null>(null);
+  const [releaseEditorMode, setReleaseEditorMode] = useState<"view" | "edit">("view");
+  const [releaseEditorBackup, setReleaseEditorBackup] = useState<ReleaseEntry | null>(null);
+  const [releaseEditorIsNewDraft, setReleaseEditorIsNewDraft] = useState(false);
   const isZh = locale === "zh-CN";
   const unsavedReleasePrompt = isZh
-    ? "Releases 有未保存变更，确定离开并丢弃这些修改吗？"
+    ? "发行记录有未保存变更，确定离开并丢弃这些修改吗？"
     : "You have unsaved release changes. Leave and discard these edits?";
 
   const draftTags = useMemo(
@@ -389,6 +397,76 @@ export function RepoView({ repo, locale = "zh-CN", onBack, onUpdateRepo, onRemov
     () => releaseDraftSnapshot !== releaseSavedSnapshot,
     [releaseDraftSnapshot, releaseSavedSnapshot],
   );
+
+  const releaseEditorItem = useMemo(() => {
+    if (!releaseEditorId) return null;
+    return releaseDrafts.find((x) => x.id === releaseEditorId) ?? null;
+  }, [releaseEditorId, releaseDrafts]);
+
+  const savedReleaseIdSet = useMemo(() => {
+    try {
+      const arr = JSON.parse(releaseSavedSnapshot) as ReleaseEntry[];
+      return new Set(arr.map((x) => x.id));
+    } catch {
+      return new Set<string>();
+    }
+  }, [releaseSavedSnapshot]);
+
+  const closeReleaseEditor = useCallback(
+    (discardEdits: boolean) => {
+      if (
+        discardEdits &&
+        releaseEditorMode === "edit" &&
+        releaseEditorBackup
+      ) {
+        if (releaseEditorIsNewDraft) {
+          setReleaseDrafts((prev) =>
+            prev.filter((x) => x.id !== releaseEditorBackup.id),
+          );
+        } else {
+          setReleaseDrafts((prev) =>
+            prev.map((x) =>
+              x.id === releaseEditorBackup.id ? releaseEditorBackup : x,
+            ),
+          );
+        }
+      }
+      setReleaseEditorBackup(null);
+      setReleaseEditorIsNewDraft(false);
+      setReleaseEditorOpen(false);
+      setReleaseEditorId(null);
+      setReleaseEditorMode("view");
+    },
+    [releaseEditorBackup, releaseEditorIsNewDraft, releaseEditorMode],
+  );
+
+  const showReleaseNotice = useCallback((msg: string) => {
+    setReleaseNotice(msg);
+    if (releaseNoticeTimeoutRef.current) clearTimeout(releaseNoticeTimeoutRef.current);
+    releaseNoticeTimeoutRef.current = setTimeout(() => {
+      setReleaseNotice(null);
+      releaseNoticeTimeoutRef.current = null;
+    }, 5500);
+  }, []);
+
+  useEffect(() => {
+    return () => {
+      if (releaseNoticeTimeoutRef.current) {
+        clearTimeout(releaseNoticeTimeoutRef.current);
+      }
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!releaseEditorOpen) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") {
+        closeReleaseEditor(true);
+      }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [releaseEditorOpen]);
 
   const blobPaths = useMemo(
     () => tree.filter((e) => e.objectType === "blob").map((e) => e.path),
@@ -490,6 +568,7 @@ export function RepoView({ repo, locale = "zh-CN", onBack, onUpdateRepo, onRemov
 
   const loadReleases = useCallback(async () => {
     setError(null);
+    setReleaseNotice(null);
     try {
       const list = await repoListReleases(repo.id);
       setReleaseDrafts(list);
@@ -1012,19 +1091,23 @@ export function RepoView({ repo, locale = "zh-CN", onBack, onUpdateRepo, onRemov
 
   function addReleaseDraft() {
     const now = Math.floor(Date.now() / 1000);
-    setReleaseDrafts((prev) => [
-      {
-        id: crypto.randomUUID(),
-        version: "",
-        title: "",
-        notes: "",
-        sourceUrl: "",
-        assets: [],
-        createdAt: now,
-        updatedAt: now,
-      },
-      ...prev,
-    ]);
+    const id = crypto.randomUUID();
+    const entry: ReleaseEntry = {
+      id,
+      version: "",
+      title: "",
+      notes: "",
+      sourceUrl: "",
+      assets: [],
+      createdAt: now,
+      updatedAt: now,
+    };
+    setReleaseDrafts((prev) => [entry, ...prev]);
+    setReleaseEditorId(id);
+    setReleaseEditorBackup(JSON.parse(JSON.stringify(entry)) as ReleaseEntry);
+    setReleaseEditorIsNewDraft(true);
+    setReleaseEditorMode("edit");
+    setReleaseEditorOpen(true);
   }
 
   function removeReleaseDraft(id: string) {
@@ -1063,65 +1146,197 @@ export function RepoView({ repo, locale = "zh-CN", onBack, onUpdateRepo, onRemov
     );
   }
 
-  async function importAssetsToRelease(releaseId: string) {
+  function mergeImportedReleaseAssets(releaseId: string, imported: ReleaseAsset[]) {
+    if (imported.length === 0) return;
+    const now = Math.floor(Date.now() / 1000);
+    setReleaseDrafts((prev) =>
+      prev.map((x) =>
+        x.id === releaseId
+          ? { ...x, assets: [...x.assets, ...imported], updatedAt: now }
+          : x,
+      ),
+    );
+  }
+
+  async function importReleasePickFiles(releaseId: string) {
     try {
       const picked = await open({
-        title: isZh ? "选择 Release 文件" : "Select release assets",
+        title: isZh ? "选择文件（可多选，任意类型）" : "Select files (any type)",
         multiple: true,
         directory: false,
       });
-      const paths = Array.isArray(picked) ? picked : picked ? [picked] : [];
+      const paths =
+        picked == null ? [] : Array.isArray(picked) ? picked : [picked];
       if (paths.length === 0) return;
-      const imported: ReleaseAsset[] = [];
-      for (const p of paths) {
-        const asset = await repoImportReleaseAsset(repo.id, releaseId, p);
-        imported.push(asset);
-      }
-      const now = Math.floor(Date.now() / 1000);
-      setReleaseDrafts((prev) =>
-        prev.map((x) =>
-          x.id === releaseId
-            ? { ...x, assets: [...x.assets, ...imported], updatedAt: now }
-            : x,
-        ),
-      );
+      const imported = await repoImportReleaseSources(repo.id, releaseId, paths);
+      mergeImportedReleaseAssets(releaseId, imported);
     } catch (e) {
       setError(String(e));
     }
   }
 
-  async function saveAllReleases() {
+  async function saveAllReleases(): Promise<boolean> {
+    setReleaseNotice(null);
     if (duplicateReleaseVersion) {
       setError(
         isZh
           ? `版本号重复：${duplicateReleaseVersion}`
           : `Duplicate release version: ${duplicateReleaseVersion}`,
       );
-      return;
+      return false;
     }
+    const now = Math.floor(Date.now() / 1000);
+    const mapped = releaseDrafts.map((x) => ({
+      ...x,
+      id: x.id.trim() || crypto.randomUUID(),
+      version: x.version.trim(),
+      title: x.title.trim(),
+      notes: x.notes.trim(),
+      sourceUrl: x.sourceUrl.trim(),
+      createdAt: x.createdAt || now,
+      updatedAt: now,
+    }));
+    const normalized = mapped.filter((x) => x.version.length > 0);
+
+    const draftMissingVersionButHasContent = releaseDrafts.some(
+      (d) =>
+        !d.version.trim() &&
+        (d.assets.length > 0 ||
+          d.title.trim().length > 0 ||
+          d.notes.trim().length > 0 ||
+          d.sourceUrl.trim().length > 0),
+    );
+    if (draftMissingVersionButHasContent) {
+      setError(
+        isZh
+          ? "有条目已添加附件或文字但未填写「版本号」，请先填写版本号再保存，否则这些条目不会被写入。"
+          : "Some entries have attachments or text but no version number. Add a version before saving.",
+      );
+      return false;
+    }
+
+    if (normalized.length === 0) {
+      if (releaseDrafts.length === 0) {
+        let ok = false;
+        setReleaseSaving(true);
+        setError(null);
+        try {
+          await repoSaveReleases(repo.id, []);
+          setReleaseSavedSnapshot("[]");
+          showReleaseNotice(
+            isZh ? "已保存（当前无任何发行记录）。" : "Saved (no release entries).",
+          );
+          ok = true;
+        } catch (e) {
+          setError(String(e));
+        } finally {
+          setReleaseSaving(false);
+        }
+        return ok;
+      }
+      setError(
+        isZh
+          ? "请至少填写一条「版本号」后再保存；仅空白草稿不会写入。"
+          : "Enter at least one version number to save. Blank drafts are not written.",
+      );
+      return false;
+    }
+
+    let ok = false;
     setReleaseSaving(true);
     setError(null);
     try {
-      const now = Math.floor(Date.now() / 1000);
-      const normalized = releaseDrafts
-        .map((x) => ({
-          ...x,
-          id: x.id.trim() || crypto.randomUUID(),
-          version: x.version.trim(),
-          title: x.title.trim(),
-          notes: x.notes.trim(),
-          sourceUrl: x.sourceUrl.trim(),
-          createdAt: x.createdAt || now,
-          updatedAt: now,
-        }))
-        .filter((x) => x.version.length > 0);
       const saved = await repoSaveReleases(repo.id, normalized);
-      setReleaseDrafts(saved);
-      setReleaseSavedSnapshot(JSON.stringify(saved));
+      const savedById = new Map(saved.map((s) => [s.id, s]));
+      const merged = mapped.map((d) => {
+        if (!d.version.trim()) return d;
+        return savedById.get(d.id) ?? d;
+      });
+      setReleaseDrafts(merged);
+      setReleaseSavedSnapshot(JSON.stringify(merged));
+      showReleaseNotice(
+        isZh ? "已保存到本仓库 .deskvio/releases/。" : "Saved to .deskvio/releases/ in this repo.",
+      );
+      ok = true;
     } catch (e) {
       setError(String(e));
     } finally {
       setReleaseSaving(false);
+    }
+
+    return ok;
+  }
+
+  async function saveReleaseEditorCurrent(): Promise<boolean> {
+    setReleaseNotice(null);
+    setError(null);
+    if (!releaseEditorItem) {
+      setError(isZh ? "没有要保存的发行条目。" : "No release entry selected.");
+      return false;
+    }
+    if (duplicateReleaseVersion) {
+      setError(
+        isZh
+          ? `版本号重复：${duplicateReleaseVersion}`
+          : `Duplicate release version: ${duplicateReleaseVersion}`,
+      );
+      return false;
+    }
+
+    const now = Math.floor(Date.now() / 1000);
+    const mapped: ReleaseEntry = {
+      ...releaseEditorItem,
+      id: releaseEditorItem.id.trim() || crypto.randomUUID(),
+      version: releaseEditorItem.version.trim(),
+      title: releaseEditorItem.title.trim(),
+      notes: releaseEditorItem.notes.trim(),
+      sourceUrl: releaseEditorItem.sourceUrl.trim(),
+      createdAt: releaseEditorItem.createdAt || now,
+      updatedAt: now,
+    };
+
+    if (mapped.version.length === 0) {
+      setError(isZh ? "版本号必填（例如 v1.2.0）。" : "Version is required (e.g. v1.2.0).");
+      return false;
+    }
+
+    let base: ReleaseEntry[] = [];
+    try {
+      base = JSON.parse(releaseSavedSnapshot) as ReleaseEntry[];
+    } catch {
+      base = [];
+    }
+
+    const byId = new Map<string, ReleaseEntry>(base.map((x) => [x.id, x]));
+    byId.set(mapped.id, mapped);
+    const next = Array.from(byId.values()).filter((x) => x.version.length > 0);
+
+    setReleaseSaving(true);
+    try {
+      const saved = await repoSaveReleases(repo.id, next);
+      setReleaseDrafts(saved);
+      setReleaseSavedSnapshot(JSON.stringify(saved));
+      showReleaseNotice(
+        isZh
+          ? "已保存到本仓库 .deskvio/releases/。"
+          : "Saved to .deskvio/releases/ in this repo.",
+      );
+      return true;
+    } catch (e) {
+      setError(String(e));
+      return false;
+    } finally {
+      setReleaseSaving(false);
+    }
+  }
+
+  async function revealReleaseAsset(asset: ReleaseAsset) {
+    try {
+      setError(null);
+      const abs = await repoResolveReleaseAssetPath(repo.id, asset.storedPath);
+      await revealItemInDir(abs);
+    } catch (e) {
+      setError(String(e));
     }
   }
 
@@ -1250,8 +1465,13 @@ export function RepoView({ repo, locale = "zh-CN", onBack, onUpdateRepo, onRemov
             aria-selected={tab === "releases"}
             className={tab === "releases" ? "active" : ""}
             onClick={() => switchTab("releases")}
+            title={
+              isZh
+                ? "仓库内的版本与附件归档（本地），与 GitHub 等平台的「发布」不是同一概念"
+                : undefined
+            }
           >
-            Releases
+            {isZh ? "发行" : "Releases"}
           </button>
         </nav>
       </header>
@@ -1910,99 +2130,361 @@ export function RepoView({ repo, locale = "zh-CN", onBack, onUpdateRepo, onRemov
 
       {tab === "releases" && (
         <div className="repo-releases-wrap repo-code-card">
+          {releaseNotice && !error && (
+            <div className="info-banner repo-release-notice" role="status">
+              {releaseNotice}
+            </div>
+          )}
           <div className="repo-releases-toolbar">
             <button type="button" className="btn-secondary" onClick={addReleaseDraft}>
-              {isZh ? "新建 Release" : "New release"}
+              {isZh ? "新建发行" : "New release"}
             </button>
             <button
               type="button"
-              className="btn-secondary"
+              className="btn-primary"
               onClick={() => void saveAllReleases()}
-              disabled={releaseSaving}
+              disabled={releaseSaving || !hasUnsavedReleases}
             >
               {releaseSaving ? (isZh ? "保存中…" : "Saving...") : (isZh ? "保存全部" : "Save all")}
             </button>
+            {hasUnsavedReleases && !releaseSaving && (
+              <span className="repo-release-unsaved-pill">
+                {isZh ? "未保存" : "Unsaved"}
+              </span>
+            )}
+            {!hasUnsavedReleases && releaseDrafts.length > 0 && !releaseSaving && (
+              <span className="settings-note repo-release-saved-note">
+                {isZh ? "已与磁盘同步" : "Saved"}
+              </span>
+            )}
             {duplicateReleaseVersion && (
               <span className="settings-note">
                 {isZh ? `版本重复：${duplicateReleaseVersion}` : `Duplicate version: ${duplicateReleaseVersion}`}
               </span>
             )}
+            <p className="settings-note">
+              {isZh
+                ? "附件在仓库内路径：.deskvio/releases/assets/…（清单 releases.json）。保存前须填写「版本号」，否则含附件的条目不会写入。"
+                : "Files live under .deskvio/releases/assets/ (manifest: releases.json). Version is required before save."}
+            </p>
           </div>
           {releaseDrafts.length === 0 ? (
             <p className="repo-ios-footnote">
-              {isZh ? "暂无 Release。点击“新建 Release”开始。" : "No releases yet. Click New release to start."}
+              {isZh
+                ? "暂无发行记录。点击「新建发行」开始。"
+                : "No releases yet. Click New release to start."}
             </p>
           ) : (
             <div className="repo-release-list">
               {releaseDrafts.map((item) => (
                 <section className="repo-release-item" key={item.id}>
                   <div className="repo-release-head">
-                    <strong>{item.version || (isZh ? "未命名版本" : "Untitled version")}</strong>
+                    <strong>
+                      {item.version || (isZh ? "未填版本号" : "No version yet")}
+                    </strong>
                     <div className="settings-confirm-actions">
                       <button
                         type="button"
                         className="btn-secondary"
-                        onClick={() => void importAssetsToRelease(item.id)}
+                        onClick={() => {
+                          setReleaseEditorId(item.id);
+                          setReleaseEditorMode("view");
+                          setReleaseEditorBackup(null);
+                          setReleaseEditorIsNewDraft(!savedReleaseIdSet.has(item.id));
+                          setReleaseEditorOpen(true);
+                        }}
                       >
-                        {isZh ? "上传文件" : "Upload files"}
+                        {isZh ? "查看" : "View"}
                       </button>
                       <button
                         type="button"
                         className="btn-secondary"
+                        onClick={() => {
+                          setReleaseEditorId(item.id);
+                          setReleaseEditorMode("edit");
+                          setReleaseEditorBackup(
+                            JSON.parse(JSON.stringify(item)) as ReleaseEntry,
+                          );
+                          setReleaseEditorIsNewDraft(!savedReleaseIdSet.has(item.id));
+                          setReleaseEditorOpen(true);
+                        }}
+                      >
+                        {isZh ? "编辑" : "Edit"}
+                      </button>
+                      <button
+                        type="button"
+                        className="btn-danger"
                         onClick={() => removeReleaseDraft(item.id)}
                       >
-                        {isZh ? "删除版本" : "Delete release"}
+                        {isZh ? "删除发行记录" : "Delete release"}
                       </button>
                     </div>
                   </div>
-                  <input
-                    className="repo-about-tag-input"
-                    placeholder={isZh ? "版本号（唯一，如 v1.2.0）" : "Version (unique, e.g. v1.2.0)"}
-                    value={item.version}
-                    onChange={(e) => updateReleaseDraft(item.id, "version", e.target.value)}
-                  />
-                  <input
-                    className="repo-about-tag-input"
-                    placeholder={isZh ? "标题" : "Title"}
-                    value={item.title}
-                    onChange={(e) => updateReleaseDraft(item.id, "title", e.target.value)}
-                  />
-                  <input
-                    className="repo-about-tag-input"
-                    placeholder={isZh ? "来源链接（可选）" : "Source URL (optional)"}
-                    value={item.sourceUrl}
-                    onChange={(e) => updateReleaseDraft(item.id, "sourceUrl", e.target.value)}
-                  />
-                  <textarea
-                    className="repo-about-tag-input repo-release-notes"
-                    placeholder={isZh ? "发布说明 / 备注" : "Release notes / remarks"}
-                    value={item.notes}
-                    onChange={(e) => updateReleaseDraft(item.id, "notes", e.target.value)}
-                  />
-                  {item.assets.length > 0 ? (
+                  <p className="settings-note repo-release-summary">
+                    {isZh
+                      ? `标题：${item.title || "—"} · 附件：${item.assets.length}`
+                      : `Title: ${item.title || "—"} · Assets: ${item.assets.length}`}
+                  </p>
+                </section>
+              ))}
+            </div>
+          )}
+          {releaseEditorOpen && releaseEditorItem && (
+            <div
+              className="settings-modal-backdrop"
+              role="presentation"
+              onClick={() => {
+                closeReleaseEditor(true);
+              }}
+            >
+              <section
+                className="settings-modal repo-settings-modal"
+                role="dialog"
+                aria-modal="true"
+                aria-label={
+                  isZh
+                    ? releaseEditorMode === "view"
+                      ? "查看发行"
+                      : "编辑发行"
+                    : releaseEditorMode === "view"
+                      ? "View release"
+                      : "Edit release"
+                }
+                onClick={(e) => e.stopPropagation()}
+              >
+                <header className="settings-modal-head">
+                  <h2>
+                    {releaseEditorMode === "view"
+                      ? isZh
+                        ? "查看发行"
+                        : "View release"
+                      : isZh
+                        ? "编辑发行"
+                        : "Edit release"}
+                    <span className="settings-note" style={{ marginLeft: "0.5rem" }}>
+                      {releaseEditorItem.version || (isZh ? "未填版本号" : "No version yet")}
+                    </span>
+                  </h2>
+                  <div className="settings-confirm-actions">
+                    {releaseEditorMode === "view" && (
+                      <button
+                        type="button"
+                        className="btn-secondary"
+                        onClick={() => {
+                          if (!releaseEditorItem) return;
+                          setReleaseEditorBackup(
+                            JSON.parse(JSON.stringify(releaseEditorItem)) as ReleaseEntry,
+                          );
+                          setReleaseEditorMode("edit");
+                          setReleaseEditorIsNewDraft(
+                            !savedReleaseIdSet.has(releaseEditorItem.id),
+                          );
+                        }}
+                        disabled={releaseSaving}
+                      >
+                        {isZh ? "编辑" : "Edit"}
+                      </button>
+                    )}
+                    <button
+                      type="button"
+                      className="btn-secondary"
+                      onClick={() => {
+                        closeReleaseEditor(true);
+                      }}
+                      disabled={releaseSaving}
+                    >
+                      {isZh ? "关闭" : "Close"}
+                    </button>
+                  </div>
+                </header>
+
+                {releaseNotice && !error && (
+                  <div className="info-banner" role="status">
+                    {releaseNotice}
+                  </div>
+                )}
+                {error && (
+                  <div className="error-banner" role="alert">
+                    {error}
+                  </div>
+                )}
+
+                <section className="settings-card">
+                  <h3>{isZh ? "版本信息" : "Version info"}</h3>
+                  <label className="repo-release-field">
+                    <span className="repo-release-field-label">
+                      {isZh ? "版本号（必填，唯一）" : "Version (required, unique)"}
+                    </span>
+                    <input
+                      className="repo-about-tag-input"
+                      placeholder={isZh ? "例如 v1.2.0" : "e.g. v1.2.0"}
+                      value={releaseEditorItem.version}
+                      disabled={releaseEditorMode !== "edit"}
+                      readOnly={releaseEditorMode !== "edit"}
+                      onChange={(e) =>
+                        updateReleaseDraft(
+                          releaseEditorItem.id,
+                          "version",
+                          e.target.value,
+                        )
+                      }
+                    />
+                  </label>
+
+                  <label className="repo-release-field">
+                    <span className="repo-release-field-label">{isZh ? "标题" : "Title"}</span>
+                    <input
+                      className="repo-about-tag-input"
+                      placeholder={isZh ? "可选" : "Optional"}
+                      value={releaseEditorItem.title}
+                      disabled={releaseEditorMode !== "edit"}
+                      readOnly={releaseEditorMode !== "edit"}
+                      onChange={(e) =>
+                        updateReleaseDraft(releaseEditorItem.id, "title", e.target.value)
+                      }
+                    />
+                  </label>
+
+                  <label className="repo-release-field">
+                    <span className="repo-release-field-label">
+                      {isZh ? "来源链接" : "Source URL"}
+                    </span>
+                    <input
+                      className="repo-about-tag-input"
+                      placeholder={isZh ? "可选" : "Optional"}
+                      value={releaseEditorItem.sourceUrl}
+                      disabled={releaseEditorMode !== "edit"}
+                      readOnly={releaseEditorMode !== "edit"}
+                      onChange={(e) =>
+                        updateReleaseDraft(
+                          releaseEditorItem.id,
+                          "sourceUrl",
+                          e.target.value,
+                        )
+                      }
+                    />
+                  </label>
+
+                  <label className="repo-release-field">
+                    <span className="repo-release-field-label">
+                      {isZh ? "说明 / 备注" : "Notes"}
+                    </span>
+                    <textarea
+                      className="repo-about-tag-input repo-release-notes"
+                      placeholder={isZh ? "可选" : "Optional"}
+                      value={releaseEditorItem.notes}
+                      disabled={releaseEditorMode !== "edit"}
+                      readOnly={releaseEditorMode !== "edit"}
+                      onChange={(e) =>
+                        updateReleaseDraft(releaseEditorItem.id, "notes", e.target.value)
+                      }
+                    />
+                  </label>
+                </section>
+
+                <section className="settings-card">
+                  <h3>{isZh ? "Assets" : "Assets"}</h3>
+                  <div className="settings-confirm-actions" style={{ justifyContent: "flex-start" }}>
+                    {releaseEditorMode === "edit" && (
+                      <button
+                        type="button"
+                        className="btn-secondary"
+                        onClick={() => void importReleasePickFiles(releaseEditorItem.id)}
+                        disabled={releaseSaving}
+                      >
+                        {isZh ? "添加文件" : "Add files"}
+                      </button>
+                    )}
+                  </div>
+
+                  {releaseEditorItem.assets.length > 0 ? (
                     <ul className="repo-release-assets">
-                      {item.assets.map((asset) => (
+                      {releaseEditorItem.assets.map((asset) => (
                         <li key={asset.id}>
                           <div className="repo-release-asset-line">
-                            <span>{asset.name}</span>
+                            <span className="repo-release-asset-name">{asset.name}</span>
                             <span className="repo-about-mono">{formatBytes(asset.sizeBytes)}</span>
                             <button
                               type="button"
                               className="btn-secondary"
-                              onClick={() => void removeReleaseAsset(item.id, asset)}
+                              onClick={() => void revealReleaseAsset(asset)}
                             >
-                              {isZh ? "移除" : "Remove"}
+                              {isZh ? "在文件夹中显示" : "Reveal in folder"}
                             </button>
+                            {releaseEditorMode === "edit" && (
+                              <button
+                                type="button"
+                                className="btn-secondary"
+                                onClick={() =>
+                                  void removeReleaseAsset(releaseEditorItem.id, asset)
+                                }
+                              >
+                                {isZh ? "移除" : "Remove"}
+                              </button>
+                            )}
                           </div>
-                          <div className="repo-about-mono">{asset.storedPath}</div>
+                          <div className="repo-about-mono repo-release-asset-path" title={asset.storedPath}>
+                            {isZh ? "仓库内：" : "In repo:"}{" "}
+                            <span className="repo-release-asset-path-inner">
+                              .deskvio/releases/{asset.storedPath.replace(/^\/+/, "")}
+                            </span>
+                          </div>
                         </li>
                       ))}
                     </ul>
                   ) : (
-                    <p className="settings-note">{isZh ? "该版本暂无文件" : "No assets in this release"}</p>
+                    <p className="settings-note">{isZh ? "该发行暂无附件" : "No assets in this release"}</p>
                   )}
                 </section>
-              ))}
+
+                <div className="settings-confirm-actions">
+                  {releaseEditorMode === "edit" ? (
+                    <>
+                      <button
+                        type="button"
+                        className="btn-primary"
+                        onClick={async () => {
+                          const ok = await saveReleaseEditorCurrent();
+                          if (ok) {
+                            setReleaseEditorBackup(null);
+                            setReleaseEditorMode("view");
+                          }
+                        }}
+                        disabled={releaseSaving || !hasUnsavedReleases}
+                      >
+                        {releaseSaving
+                          ? isZh
+                            ? "保存中…"
+                            : "Saving..."
+                          : isZh
+                            ? "保存并同步"
+                            : "Save & sync"}
+                      </button>
+                      <button
+                        type="button"
+                        className="btn-secondary"
+                        onClick={() => {
+                          closeReleaseEditor(true);
+                        }}
+                        disabled={releaseSaving}
+                      >
+                        {isZh ? "稍后再说" : "Not now"}
+                      </button>
+                    </>
+                  ) : (
+                    <button
+                      type="button"
+                      className="btn-secondary"
+                      onClick={() => {
+                        closeReleaseEditor(false);
+                      }}
+                      disabled={releaseSaving}
+                    >
+                      {isZh ? "关闭" : "Close"}
+                    </button>
+                  )}
+                </div>
+              </section>
             </div>
           )}
         </div>

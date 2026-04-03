@@ -155,7 +155,7 @@ export async function hubScanDirectory(
   root: string,
   maxDepth?: number,
 ): Promise<RepoRecord[]> {
-  return invoke("hub_scan_directory", { root, max_depth: maxDepth });
+  return invoke("hub_scan_directory", { root, maxDepth });
 }
 
 export async function hubSetFavorite(
@@ -334,8 +334,20 @@ export async function repoImportReleaseAsset(
 ): Promise<ReleaseAsset> {
   return invoke("repo_import_release_asset", {
     id,
-    release_id: releaseId,
-    source_path: sourcePath,
+    releaseId,
+    sourcePath,
+  });
+}
+
+export async function repoImportReleaseSources(
+  id: number,
+  releaseId: string,
+  sourcePaths: string[],
+): Promise<ReleaseAsset[]> {
+  return invoke("repo_import_release_sources", {
+    id,
+    releaseId,
+    sourcePaths,
   });
 }
 
@@ -345,7 +357,17 @@ export async function repoDeleteReleaseAsset(
 ): Promise<void> {
   return invoke("repo_delete_release_asset", {
     id,
-    stored_path: storedPath,
+    storedPath,
+  });
+}
+
+export async function repoResolveReleaseAssetPath(
+  id: number,
+  storedPath: string,
+): Promise<string> {
+  return invoke("repo_resolve_release_asset_path", {
+    id,
+    storedPath,
   });
 }
 
@@ -354,7 +376,7 @@ export async function importZip(
   destParent?: string | null,
 ): Promise<RepoRecord[]> {
   return invoke("import_zip", {
-    zip_path: zipPath,
+    zipPath,
     destParent: destParent ?? null,
   });
 }
