@@ -446,12 +446,6 @@ body {
   max-width: 1600px;
   margin-inline: auto;
 }
-
-/* Immersive markdown reader: hide app chrome (set from RepoView) */
-/*
- * 仅锁 .main 不够：.app-shell 只有 min-height:100vh、子项 min-height:auto 时，
- * 壳会随内容无限变高，滚动落在 document 上，顶栏和正文一起被卷走，viewport scrollTop 也对不齐。
- */
 html[data-repo-reader="1"] {
   height: 100vh;
   height: 100dvh;
@@ -482,7 +476,6 @@ html[data-repo-reader="1"] .app-shell .sidebar {
 
 html[data-repo-reader="1"] .app-shell .main {
   padding: 0;
-  /* 禁止整页滚动：阅读模式只让 .repo-ios-viewport 滚，与分栏时一致，scroll 恢复才能对上 */
   overflow: hidden;
   min-height: 0;
   display: flex;
@@ -2194,12 +2187,9 @@ html[data-theme="light"] .repo-view-ios {
   flex-shrink: 0;
 }
 
-/* ── full-page reader mode (markdown) ── */
-
 .repo-view-ios.reader-mode {
   margin: 0;
   padding: 0 0 0.5rem;
-  /* 填满上层 flex 区，不用 min-height:100vh 顶破 .main 导致外层滚动 */
   flex: 1;
   min-height: 0;
   overflow: hidden;
@@ -2250,7 +2240,6 @@ html[data-theme="light"] .repo-view-ios {
   display: flex;
   flex-direction: column;
   overflow: hidden;
-  /* 宽屏下用足横向空间，仍限制最大行宽避免过宽难读 */
   max-width: min(100% - 1.5rem, 72rem);
   width: 100%;
   margin: 0 auto;
@@ -2291,7 +2280,6 @@ html[data-theme="light"] .repo-view-ios {
   border-bottom: 0.5px solid var(--ios-separator);
 }
 
-/* 阅读布局下滚动只在 .repo-ios-viewport；祖先含 overflow:hidden 时 sticky 易失效，顶栏用普通过块级即可固定在上 */
 .repo-view-ios.reader-mode .repo-reader-chrome {
   position: relative;
   top: auto;
@@ -3170,7 +3158,6 @@ html[data-theme="light"] .repo-file-name-btn.active {
   overflow: hidden;
 }
 
-/* 关键：允许 flex 子项收缩，否则内容会把 viewport 撑满整页，滚动跑到外层 .main 上，scrollTop 永远是 0 */
 .repo-reader-panel .repo-ios-viewport {
   max-height: none;
   min-height: 0;
@@ -3538,8 +3525,6 @@ html[data-theme="light"] .repo-file-name-btn.active {
   }
 }
 
-/* ── onboarding empty-state ── */
-
 .hub-onboarding {
   text-align: center;
   padding: 2.5rem 1rem 3rem;
@@ -3682,8 +3667,6 @@ html[data-theme="dark"] .clone-conflict-overlay {
   margin-top: 0.25rem;
 }
 
-/* ── clone log ── */
-
 .hub-clone-log {
   max-height: 180px;
   overflow-y: auto;
@@ -3700,8 +3683,6 @@ html[data-theme="dark"] .clone-conflict-overlay {
   word-break: break-all;
 }
 
-/* ── settings repo root browse row ── */
-
 .settings-repo-root-row {
   display: flex;
   gap: 0.5rem;
@@ -3712,8 +3693,6 @@ html[data-theme="dark"] .clone-conflict-overlay {
   flex: 1;
   min-width: 0;
 }
-
-/* ── help FAQ ── */
 
 .help-steps {
   padding-left: 1.35rem;

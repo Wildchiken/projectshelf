@@ -14,7 +14,7 @@ import {
   hubCheckCloneConflict,
   hubCloneRepoStream,
   hubListRepos,
-  hubOverwriteFetchReset,
+  hubOverwriteFetchResetAuto,
   hubPruneMissingRepos,
   hubScanDirectory,
   hubSearch,
@@ -84,7 +84,9 @@ export function HubView({
   const [conflictRepo, setConflictRepo] = useState<RepoRecord | null>(null);
   const [conflictPendingDestParent, setConflictPendingDestParent] = useState<string>("");
   const [overwriteBusy, setOverwriteBusy] = useState(false);
-  const [overwriteResult, setOverwriteResult] = useState<{ ok: boolean; dirty?: boolean; error?: string } | null>(null);
+  const [overwriteResult, setOverwriteResult] = useState<
+    { ok: boolean; dirty?: boolean; stashed?: boolean; error?: string } | null
+  >(null);
   const moreRef = useRef<HTMLDivElement>(null);
   const listRef = useRef<HTMLUListElement>(null);
   const lastScannedRepoRootRef = useRef<string>(getEffectiveRepoRoot());
@@ -485,10 +487,11 @@ export function HubView({
     setOverwriteBusy(true);
     setOverwriteResult(null);
     try {
-      const result = await hubOverwriteFetchReset(conflictRepo.id);
+      const result = await hubOverwriteFetchResetAuto(conflictRepo.id);
       setOverwriteResult({
         ok: result.ok,
         dirty: result.dirty,
+        stashed: result.stashed,
         error: result.error ?? undefined,
       });
       if (result.ok) {
@@ -786,11 +789,15 @@ export function HubView({
             {overwriteResult && (
               <div className={overwriteResult.ok ? "info-banner" : "error-banner"}>
                 {overwriteResult.ok
-                  ? isZh ? "已更新" : "Updated"
+                  ? overwriteResult.stashed
+                    ? isZh
+                      ? "已更新（已暂存本地改动；需要时可用 git stash pop 恢复）"
+                      : "Updated (stashed local changes; use git stash pop to restore)"
+                    : isZh ? "已更新" : "Updated"
                   : overwriteResult.dirty
                     ? isZh
-                      ? "有未提交改动，无法覆盖。"
-                      : "Uncommitted changes; cannot update."
+                      ? "检测到本地已跟踪的未提交更改；覆盖更新会丢弃这些改动。"
+                      : "Local has uncommitted tracked changes; overwrite will discard them."
                     : overwriteResult.error ?? (isZh ? "失败" : "Failed")}
               </div>
             )}
@@ -816,7 +823,9 @@ export function HubView({
                 type="button"
                 className="btn-primary"
                 onClick={() => void handleConflictOverwrite()}
-                disabled={overwriteBusy || overwriteResult?.ok === true}
+                disabled={
+                  overwriteBusy || overwriteResult?.ok === true
+                }
               >
                 {overwriteBusy
                   ? isZh ? "更新中…" : "Updating..."

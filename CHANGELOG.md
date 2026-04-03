@@ -5,6 +5,14 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.1.6] - 2026-04-03
+
+### Fixed
+- Hub overwrite update: when local has uncommitted tracked changes, automatically stashes and proceeds with `fetch + reset --hard` so users are not blocked by a confusing “cannot overwrite” message.
+
+### Changed
+- Conflict dialog feedback is clearer: overwrite reports whether local changes were stashed (and hints `git stash pop` to restore).
+
 ## [1.1.5] - 2026-04-03
 
 ### Changed

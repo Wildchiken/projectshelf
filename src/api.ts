@@ -124,11 +124,18 @@ export async function hubCheckCloneConflict(url: string): Promise<RepoRecord | n
 export type FetchResetResult = {
   ok: boolean;
   dirty: boolean;
+  stashed: boolean;
   error: string | null;
 };
 
 export async function hubOverwriteFetchReset(id: number): Promise<FetchResetResult> {
   return invoke("hub_overwrite_fetch_reset", { id });
+}
+
+export async function hubOverwriteFetchResetAuto(
+  id: number,
+): Promise<FetchResetResult> {
+  return invoke("hub_overwrite_fetch_reset_auto", { id });
 }
 
 export function onCloneProgress(

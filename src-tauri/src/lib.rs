@@ -961,6 +961,7 @@ fn hub_check_clone_conflict(
 struct FetchResetResult {
     ok: bool,
     dirty: bool,
+    stashed: bool,
     error: Option<String>,
 }
 
@@ -985,12 +986,34 @@ fn hub_overwrite_fetch_reset(
 
     if !status_out.status.success() {
         let err = String::from_utf8_lossy(&status_out.stderr).trim().to_string();
-        return Ok(FetchResetResult { ok: false, dirty: false, error: Some(err) });
+        return Ok(FetchResetResult { ok: false, dirty: false, stashed: false, error: Some(err) });
     }
 
     let status_text = String::from_utf8_lossy(&status_out.stdout);
     if !status_text.trim().is_empty() {
-        return Ok(FetchResetResult { ok: false, dirty: true, error: None });
+        let mut has_tracked_uncommitted = false;
+        for line in status_text.lines() {
+            let t = line.trim_start();
+            if t.is_empty() {
+                continue;
+            }
+            if t.starts_with("??") {
+                continue;
+            }
+            if t.starts_with("!!") {
+                continue;
+            }
+            has_tracked_uncommitted = true;
+            break;
+        }
+        if has_tracked_uncommitted {
+            return Ok(FetchResetResult {
+                ok: false,
+                dirty: true,
+                stashed: false,
+                error: None,
+            });
+        }
     }
 
     let fetch_out = std::process::Command::new(&state.git_bin)
@@ -1003,6 +1026,7 @@ fn hub_overwrite_fetch_reset(
         return Ok(FetchResetResult {
             ok: false,
             dirty: false,
+            stashed: false,
             error: Some(format!("fetch failed: {}", err)),
         });
     }
@@ -1017,6 +1041,7 @@ fn hub_overwrite_fetch_reset(
         return Ok(FetchResetResult {
             ok: false,
             dirty: false,
+            stashed: false,
             error: Some(format!("reset failed: {}", err)),
         });
     }
@@ -1028,7 +1053,118 @@ fn hub_overwrite_fetch_reset(
         }
     }
 
-    Ok(FetchResetResult { ok: true, dirty: false, error: None })
+    Ok(FetchResetResult { ok: true, dirty: false, stashed: false, error: None })
+}
+
+#[tauri::command]
+fn hub_overwrite_fetch_reset_auto(
+    state: tauri::State<'_, AppState>,
+    id: i64,
+) -> Result<FetchResetResult, String> {
+    let db = state.db.lock().map_err(|e| e.to_string())?;
+    let repo = db
+        .get(id)
+        .map_err(map_db_err)?
+        .ok_or_else(|| "repository not found".to_string())?;
+    drop(db);
+
+    let path_str = repo.path.clone();
+
+    let status_out = std::process::Command::new(&state.git_bin)
+        .args(["-C", &path_str, "status", "--porcelain"])
+        .output()
+        .map_err(|e| e.to_string())?;
+
+    if !status_out.status.success() {
+        let err = String::from_utf8_lossy(&status_out.stderr).trim().to_string();
+        return Ok(FetchResetResult {
+            ok: false,
+            dirty: false,
+            stashed: false,
+            error: Some(err),
+        });
+    }
+
+    let status_text = String::from_utf8_lossy(&status_out.stdout);
+    let mut has_tracked_uncommitted = false;
+    if !status_text.trim().is_empty() {
+        for line in status_text.lines() {
+            let t = line.trim_start();
+            if t.is_empty() {
+                continue;
+            }
+            if t.starts_with("??") {
+                continue;
+            }
+            if t.starts_with("!!") {
+                continue;
+            }
+            has_tracked_uncommitted = true;
+            break;
+        }
+    }
+
+    if has_tracked_uncommitted {
+        let ts = now_unix();
+        let stash_msg = format!("deskvio-overwrite-{}", ts);
+        let stash_out = std::process::Command::new(&state.git_bin)
+            .args(["-C", &path_str, "stash", "push", "-u", "-m", &stash_msg])
+            .output()
+            .map_err(|e| e.to_string())?;
+        if !stash_out.status.success() {
+            let err = String::from_utf8_lossy(&stash_out.stderr).trim().to_string();
+            return Ok(FetchResetResult {
+                ok: false,
+                dirty: false,
+                stashed: false,
+                error: Some(format!("stash failed: {}", err)),
+            });
+        }
+    }
+
+    let fetch_out = std::process::Command::new(&state.git_bin)
+        .args(["-C", &path_str, "fetch", "origin"])
+        .output()
+        .map_err(|e| e.to_string())?;
+
+    if !fetch_out.status.success() {
+        let err = String::from_utf8_lossy(&fetch_out.stderr).trim().to_string();
+        return Ok(FetchResetResult {
+            ok: false,
+            dirty: false,
+            stashed: false,
+            error: Some(format!("fetch failed: {}", err)),
+        });
+    }
+
+    let reset_out = std::process::Command::new(&state.git_bin)
+        .args(["-C", &path_str, "reset", "--hard", "FETCH_HEAD"])
+        .output()
+        .map_err(|e| e.to_string())?;
+
+    if !reset_out.status.success() {
+        let err = String::from_utf8_lossy(&reset_out.stderr).trim().to_string();
+        return Ok(FetchResetResult {
+            ok: false,
+            dirty: false,
+            stashed: false,
+            error: Some(format!("reset failed: {}", err)),
+        });
+    }
+
+    if let Ok(ctx) = load_ctx(&state.git_bin, &path_str) {
+        let new_head = head_sha(&state.git_bin, &ctx).ok();
+        if let Ok(db) = state.db.lock() {
+            let _ = db.insert_repo(&path_str, repo.display_name, repo.is_bare, new_head);
+        }
+    }
+
+    Ok(FetchResetResult {
+        ok: true,
+        dirty: false,
+        stashed: has_tracked_uncommitted,
+        error: None,
+    })
 }
 
 #[tauri::command]
@@ -2008,6 +2144,7 @@ pub fn run() {
             hub_cancel_clone,
             hub_check_clone_conflict,
             hub_overwrite_fetch_reset,
+            hub_overwrite_fetch_reset_auto,
             hub_remove_repo,
             hub_unlink_repo,
             hub_scan_directory,
