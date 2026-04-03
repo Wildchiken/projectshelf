@@ -1,5 +1,6 @@
 mod db;
 mod git;
+mod repo_meta;
 
 use base64::Engine;
 use db::{Database, RepoRecord};
@@ -515,7 +516,7 @@ fn scan_directory_inner(
         let name = path
             .file_name()
             .map(|s| s.to_string_lossy().to_string());
-        let rec = db
+        let mut rec = db
             .insert_repo(
                 &path.to_string_lossy(),
                 name,
@@ -523,6 +524,10 @@ fn scan_directory_inner(
                 head,
             )
             .map_err(map_db_err)?;
+        let _ = repo_meta::merge_disk_into_db(&db, rec.id, &path);
+        if let Ok(Some(updated)) = db.get(rec.id) {
+            rec = updated;
+        }
         added.push(rec);
     }
     Ok(added)
@@ -577,13 +582,19 @@ fn hub_add_repo(state: tauri::State<'_, AppState>, path: String) -> Result<RepoR
         .file_name()
         .map(|s| s.to_string_lossy().to_string());
     let db = state.db.lock().map_err(|e| e.to_string())?;
-    db.insert_repo(
-        &canon.to_string_lossy(),
-        name,
-        ctx.bare,
-        head.clone(),
-    )
-    .map_err(map_db_err)
+    let mut rec = db
+        .insert_repo(
+            &canon.to_string_lossy(),
+            name,
+            ctx.bare,
+            head.clone(),
+        )
+        .map_err(map_db_err)?;
+    let _ = repo_meta::merge_disk_into_db(&db, rec.id, &canon);
+    if let Ok(Some(updated)) = db.get(rec.id) {
+        rec = updated;
+    }
+    Ok(rec)
 }
 
 #[tauri::command]
@@ -645,13 +656,19 @@ fn hub_clone_repo(
         .file_name()
         .map(|s| s.to_string_lossy().to_string());
     let db = state.db.lock().map_err(|e| e.to_string())?;
-    db.insert_repo(
-        &canon.to_string_lossy(),
-        display_name,
-        ctx.bare,
-        head,
-    )
-    .map_err(map_db_err)
+    let mut rec = db
+        .insert_repo(
+            &canon.to_string_lossy(),
+            display_name,
+            ctx.bare,
+            head,
+        )
+        .map_err(map_db_err)?;
+    let _ = repo_meta::merge_disk_into_db(&db, rec.id, &canon);
+    if let Ok(Some(updated)) = db.get(rec.id) {
+        rec = updated;
+    }
+    Ok(rec)
 }
 
 fn compute_clone_dest(url: &str, dest_parent: Option<String>) -> Result<PathBuf, String> {
@@ -782,8 +799,14 @@ fn hub_clone_repo_stream(
                     let head = head_sha(&st.git_bin, &ctx).ok();
                     let display_name = canon.file_name().map(|s| s.to_string_lossy().to_string());
                     let db = st.db.lock().map_err(|e| e.to_string())?;
-                    db.insert_repo(&canon.to_string_lossy(), display_name, ctx.bare, head)
-                        .map_err(map_db_err)
+                    let mut rec = db
+                        .insert_repo(&canon.to_string_lossy(), display_name, ctx.bare, head)
+                        .map_err(map_db_err)?;
+                    let _ = repo_meta::merge_disk_into_db(&db, rec.id, &canon);
+                    if let Ok(Some(updated)) = db.get(rec.id) {
+                        rec = updated;
+                    }
+                    Ok(rec)
                 })();
                 let _ = app.emit("clone-done", serde_json::json!({
                     "sessionId": &sid,
@@ -1071,7 +1094,9 @@ fn hub_set_tags(
     tags: Vec<String>,
 ) -> Result<(), String> {
     let db = state.db.lock().map_err(|e| e.to_string())?;
-    db.set_tags(id, &tags).map_err(map_db_err)
+    db.set_tags(id, &tags).map_err(map_db_err)?;
+    repo_meta::persist_from_db(&db, id)?;
+    Ok(())
 }
 
 #[tauri::command]
@@ -1091,7 +1116,44 @@ fn hub_set_project_intro(
     intro: Option<String>,
 ) -> Result<(), String> {
     let db = state.db.lock().map_err(|e| e.to_string())?;
-    db.set_project_intro(id, intro).map_err(map_db_err)
+    db.set_project_intro(id, intro).map_err(map_db_err)?;
+    repo_meta::persist_from_db(&db, id)?;
+    Ok(())
+}
+
+#[tauri::command]
+fn hub_sync_repo_meta_from_disk(
+    state: tauri::State<'_, AppState>,
+    id: i64,
+) -> Result<RepoRecord, String> {
+    let db = state.db.lock().map_err(|e| e.to_string())?;
+    let r = db
+        .get(id)
+        .map_err(map_db_err)?
+        .ok_or_else(|| "repository not found".to_string())?;
+    let root = Path::new(&r.path);
+    repo_meta::merge_disk_into_db(&db, id, root).map_err(map_db_err)?;
+    db.get(id)
+        .map_err(map_db_err)?
+        .ok_or_else(|| "repository not found".to_string())
+}
+
+#[tauri::command]
+fn repo_resolve_worktree_path(
+    state: tauri::State<'_, AppState>,
+    id: i64,
+    relative_path: String,
+) -> Result<String, String> {
+    let db = state.db.lock().map_err(|e| e.to_string())?;
+    let r = db
+        .get(id)
+        .map_err(map_db_err)?
+        .ok_or_else(|| "repository not found".to_string())?;
+    if r.is_bare {
+        return Err("bare repository has no worktree files".into());
+    }
+    let path = repo_meta::resolve_worktree_file_path(&r.path, relative_path.trim())?;
+    Ok(path.to_string_lossy().to_string())
 }
 
 #[tauri::command]
@@ -1868,6 +1930,8 @@ pub fn run() {
             hub_set_tags,
             hub_set_display_name,
             hub_set_project_intro,
+            hub_sync_repo_meta_from_disk,
+            repo_resolve_worktree_path,
             hub_touch_repo,
             hub_refresh_heads,
             repo_ls_tree,

@@ -104,6 +104,18 @@ export function HelpView({ locale = "zh-CN" }: Props) {
                 ? "点击侧栏底部的「设置」（⋯），在「显示与主题」中切换浅色/深色。"
                 : "Click \"Settings\" (⋯) at the bottom of the sidebar, then toggle Light/Dark under \"Display & Theme\"."}
             </dd>
+            <dt>{isZh ? "项目简介和标签存在哪？" : "Where are project intro and tags stored?"}</dt>
+            <dd>
+              {isZh
+                ? "除本机数据库外，会写入仓库目录下的 .deskvio/project.json。复制整个仓库文件夹即可带走。若希望 git clone 后也有同样内容，请将该文件纳入 Git；若不想进版本库，可把 .deskvio/ 加入 .gitignore。"
+                : "Besides the local database, they are written to .deskvio/project.json inside the repository. Copy the whole repo folder to keep them. Commit that file if you want the same data after git clone; add .deskvio/ to .gitignore to keep them local-only."}
+            </dd>
+            <dt>{isZh ? "如何用系统程序打开当前文件？" : "How do I open the current file in a system app?"}</dt>
+            <dd>
+              {isZh
+                ? "在「代码」标签选中文件后，使用「用系统应用打开」或「在文件夹中显示」（裸仓库无工作区时不可用）。"
+                : "On the Code tab, after selecting a file, use \"Open in default app\" or \"Reveal in folder\" (not available for bare repos without a worktree)."}
+            </dd>
           </dl>
         </article>
 

@@ -1,6 +1,6 @@
 [package]
 name = "deskvio"
-version = "1.1.3"
+version = "1.1.4"
 description = "Deskvio — local-first Git repository desktop app"
 authors = ["Wildchiken"]
 edition = "2021"

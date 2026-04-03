@@ -183,6 +183,17 @@ export async function hubSetProjectIntro(
   return invoke("hub_set_project_intro", { id, intro });
 }
 
+export async function hubSyncRepoMetaFromDisk(id: number): Promise<RepoRecord> {
+  return invoke("hub_sync_repo_meta_from_disk", { id });
+}
+
+export async function repoResolveWorktreePath(
+  id: number,
+  relativePath: string,
+): Promise<string> {
+  return invoke("repo_resolve_worktree_path", { id, relativePath });
+}
+
 export async function hubTouchRepo(id: number): Promise<void> {
   return invoke("hub_touch_repo", { id });
 }

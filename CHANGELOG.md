@@ -5,7 +5,14 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [1.1.4] - 2026-04-03
+
+### Added
+- Project intro and Hub tags persist to `.deskvio/project.json` in the repository; synced with the Hub database on save, scan, add, clone, and when opening a repo. About sidebar shows the project intro; settings explain Git vs local-only choices.
+- Code tab: open the selected worktree file in the default system app or reveal it in the file manager (non-bare repos).
+
+### Changed
+- File open / reveal actions moved from a standalone row into the breadcrumb bar as compact icon buttons; removes the visual gap between breadcrumbs and the Preview / Code toggle.
 
 ## [1.1.3] - 2026-04-03
 

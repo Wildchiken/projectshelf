@@ -756,7 +756,7 @@ dependencies = [
 
 [[package]]
 name = "deskvio"
-version = "1.1.3"
+version = "1.1.4"
 dependencies = [
  "base64 0.22.1",
  "directories",

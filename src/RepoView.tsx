@@ -8,6 +8,7 @@ import {
   type MutableRefObject,
 } from "react";
 import { open } from "@tauri-apps/plugin-dialog";
+import { openPath, revealItemInDir } from "@tauri-apps/plugin-opener";
 import type {
   CommitSummary,
   RefLists,
@@ -22,6 +23,8 @@ import {
   hubRemoveRepo,
   hubSetProjectIntro,
   hubSetTags,
+  hubSyncRepoMetaFromDisk,
+  repoResolveWorktreePath,
   repoBlobBase64,
   repoBlobText,
   repoCommit,
@@ -245,6 +248,8 @@ export function RepoView({ repo, locale = "zh-CN", onBack, onUpdateRepo, onRemov
   const [commitMessage, setCommitMessage] = useState("");
   const [busy, setBusy] = useState(false);
   const autoReadmeDone = useRef(false);
+  const onUpdateRepoRef = useRef(onUpdateRepo);
+  onUpdateRepoRef.current = onUpdateRepo;
   const pathCommitCache = useRef(new Map<string, CommitSummary | null>());
   const [pathCommitVersion, setPathCommitVersion] = useState(0);
 
@@ -465,6 +470,18 @@ export function RepoView({ repo, locale = "zh-CN", onBack, onUpdateRepo, onRemov
   useEffect(() => {
     setIntroDraft(repo.projectIntro ?? "");
   }, [repo.projectIntro]);
+
+  useEffect(() => {
+    let cancelled = false;
+    void hubSyncRepoMetaFromDisk(repo.id)
+      .then((next) => {
+        if (!cancelled) onUpdateRepoRef.current?.(next);
+      })
+      .catch(() => {});
+    return () => {
+      cancelled = true;
+    };
+  }, [repo.id]);
 
   useEffect(() => {
     pathCommitCache.current.clear();
@@ -939,6 +956,18 @@ export function RepoView({ repo, locale = "zh-CN", onBack, onUpdateRepo, onRemov
     }
   }
 
+  async function openWorktreeInSystem(mode: "open" | "reveal") {
+    if (!selectedPath || repo.isBare) return;
+    setError(null);
+    try {
+      const abs = await repoResolveWorktreePath(repo.id, selectedPath);
+      if (mode === "open") await openPath(abs);
+      else await revealItemInDir(abs);
+    } catch (e) {
+      setError(String(e));
+    }
+  }
+
   async function saveRepoTags() {
     const tags = draftTags;
     setError(null);
@@ -1250,6 +1279,34 @@ export function RepoView({ repo, locale = "zh-CN", onBack, onUpdateRepo, onRemov
           >
             {readerDocName || title}
           </h1>
+          {selectedPath && !repo.isBare && (
+            <div className="repo-reader-chrome-worktree">
+              <button
+                type="button"
+                className="repo-ios-bc-action-btn"
+                title={isZh ? "用系统应用打开" : "Open in default app"}
+                aria-label={isZh ? "用系统应用打开" : "Open in default app"}
+                onClick={() => void openWorktreeInSystem("open")}
+              >
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
+                  <path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/>
+                  <polyline points="15 3 21 3 21 9"/>
+                  <line x1="10" y1="14" x2="21" y2="3"/>
+                </svg>
+              </button>
+              <button
+                type="button"
+                className="repo-ios-bc-action-btn"
+                title={isZh ? "在文件夹中显示" : "Reveal in folder"}
+                aria-label={isZh ? "在文件夹中显示" : "Reveal in folder"}
+                onClick={() => void openWorktreeInSystem("reveal")}
+              >
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
+                  <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/>
+                </svg>
+              </button>
+            </div>
+          )}
           <button
             type="button"
             className="repo-reader-chrome-exit"
@@ -1452,22 +1509,52 @@ export function RepoView({ repo, locale = "zh-CN", onBack, onUpdateRepo, onRemov
               <section className="repo-reader-panel repo-code-card" aria-label={isZh ? "文件内容" : "File contents"}>
                 {!readerExpanded && (
                   <div className="repo-ios-breadcrumb" aria-label={isZh ? "当前文件" : "Current file"}>
-                    {selectedPath?.split("/").map((part, i, arr) => (
-                      <span key={`${i}-${part}`}>
-                        {i > 0 && <span className="repo-ios-bc-sep">/</span>}
-                        <span
-                          className={
-                            i === arr.length - 1
-                              ? "repo-ios-bc-current"
-                              : "repo-ios-bc-part"
-                          }
-                        >
-                          {part}
+                    <div className="repo-ios-bc-path">
+                      {selectedPath?.split("/").map((part, i, arr) => (
+                        <span key={`${i}-${part}`}>
+                          {i > 0 && <span className="repo-ios-bc-sep">/</span>}
+                          <span
+                            className={
+                              i === arr.length - 1
+                                ? "repo-ios-bc-current"
+                                : "repo-ios-bc-part"
+                            }
+                          >
+                            {part}
+                          </span>
                         </span>
-                      </span>
-                    ))}
-                    {!selectedPath && (
-                      <span className="repo-ios-bc-placeholder">{isZh ? "选择文件" : "Select a file"}</span>
+                      ))}
+                      {!selectedPath && (
+                        <span className="repo-ios-bc-placeholder">{isZh ? "选择文件" : "Select a file"}</span>
+                      )}
+                    </div>
+                    {selectedPath && !repo.isBare && (
+                      <div className="repo-ios-bc-actions">
+                        <button
+                          type="button"
+                          className="repo-ios-bc-action-btn"
+                          title={isZh ? "用系统应用打开" : "Open in default app"}
+                          aria-label={isZh ? "用系统应用打开" : "Open in default app"}
+                          onClick={() => void openWorktreeInSystem("open")}
+                        >
+                          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
+                            <path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/>
+                            <polyline points="15 3 21 3 21 9"/>
+                            <line x1="10" y1="14" x2="21" y2="3"/>
+                          </svg>
+                        </button>
+                        <button
+                          type="button"
+                          className="repo-ios-bc-action-btn"
+                          title={isZh ? "在文件夹中显示" : "Reveal in folder"}
+                          aria-label={isZh ? "在文件夹中显示" : "Reveal in folder"}
+                          onClick={() => void openWorktreeInSystem("reveal")}
+                        >
+                          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
+                            <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/>
+                          </svg>
+                        </button>
+                      </div>
                     )}
                   </div>
                 )}
@@ -1568,6 +1655,25 @@ export function RepoView({ repo, locale = "zh-CN", onBack, onUpdateRepo, onRemov
                       <p className="repo-ios-footnote">
                         {isZh ? "若应为图片，请确认扩展名（如 .png）。" : "If this should be an image, verify the file extension (e.g. .png)."}
                       </p>
+                      {selectedPath && !repo.isBare && (
+                        <div className="repo-binary-actions">
+                          <button
+                            type="button"
+                            className="repo-binary-action-btn"
+                            onClick={() => void openWorktreeInSystem("open")}
+                          >
+                            {isZh ? "用系统应用打开" : "Open in default app"}
+                          </button>
+                          <span className="repo-binary-action-sep" aria-hidden>·</span>
+                          <button
+                            type="button"
+                            className="repo-binary-action-btn"
+                            onClick={() => void openWorktreeInSystem("reveal")}
+                          >
+                            {isZh ? "在文件夹中显示" : "Reveal in folder"}
+                          </button>
+                        </div>
+                      )}
                     </div>
                   )}
                 </div>
@@ -1577,6 +1683,11 @@ export function RepoView({ repo, locale = "zh-CN", onBack, onUpdateRepo, onRemov
 
           <aside className="repo-about-sidebar repo-code-card" aria-label={isZh ? "关于" : "About"}>
             <h2 className="repo-about-title">{isZh ? "关于" : "About"}</h2>
+            {repo.projectIntro?.trim() && (
+              <p className="repo-about-desc repo-about-project-intro">
+                {repo.projectIntro.trim()}
+              </p>
+            )}
             {readmeBlurb && (
               <p className="repo-about-desc">{readmeBlurb}</p>
             )}
@@ -1668,6 +1779,11 @@ export function RepoView({ repo, locale = "zh-CN", onBack, onUpdateRepo, onRemov
             </header>
             <section className="settings-card">
               <h3>{isZh ? "项目简介" : "Project intro"}</h3>
+              <p className="settings-note">
+                {isZh
+                  ? "简介与标签会写入仓库内 .deskvio/project.json，复制整个文件夹即可带走。需要 git clone 后也有同一份数据时请提交该文件；若不想进版本库，可将 .deskvio/ 加入 .gitignore。"
+                  : "Intro and tags are saved to .deskvio/project.json in the repository. Copy the folder to keep them. Commit that file if you want the same data after git clone; add .deskvio/ to .gitignore to keep them local-only."}
+              </p>
               <div className="repo-about-tag-input-row">
                 <input
                   id={`repo-intro-${repo.id}`}
