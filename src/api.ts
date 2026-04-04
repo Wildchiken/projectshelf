@@ -138,6 +138,50 @@ export async function hubOverwriteFetchResetAuto(
   return invoke("hub_overwrite_fetch_reset_auto", { id });
 }
 
+export type HubPullFailure = {
+  id: number;
+  displayHint: string;
+  error: string;
+};
+
+export type HubPullBatchSummary = {
+  total: number;
+  succeeded: number;
+  failed: number;
+  skippedMissing: number;
+  failures: HubPullFailure[];
+};
+
+export async function hubPullFromRemoteAutoMany(
+  ids: number[],
+): Promise<HubPullBatchSummary> {
+  return invoke("hub_pull_from_remote_auto_many", { ids });
+}
+
+export async function hubPullFromRemoteAutoAll(): Promise<HubPullBatchSummary> {
+  return invoke("hub_pull_from_remote_auto_all");
+}
+
+export type HubPullProgressPayload =
+  | { phase: "start"; total: number }
+  | {
+      phase: "item";
+      index: number;
+      total: number;
+      id: number;
+      displayHint: string;
+      status: "ok" | "failed" | "skipped";
+      error?: string | null;
+    };
+
+export function onHubPullProgress(
+  cb: (payload: HubPullProgressPayload) => void,
+): Promise<UnlistenFn> {
+  return listen<HubPullProgressPayload>("hub-pull-progress", (e) =>
+    cb(e.payload),
+  );
+}
+
 export function onCloneProgress(
   cb: (payload: CloneProgressPayload) => void,
 ): Promise<UnlistenFn> {

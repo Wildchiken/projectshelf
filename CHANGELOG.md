@@ -5,6 +5,19 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.1.7] - 2026-04-04
+
+### Added
+- Hub: **Pull** on each repo card, **Update all from remote** and **multi-select batch update** under the ⋯ menu (`git fetch origin` + `reset --hard FETCH_HEAD`, with stash when needed); in-app confirm dialogs instead of the browser confirm box.
+- Backend: `hub_pull_from_remote_auto_many` / `hub_pull_from_remote_auto_all` plus `hub-pull-progress` events for live per-repo progress during batch updates.
+- Help: **Update repositories from remote** section (`#help-remote-update`) and how it differs from **Sync All HEADs**.
+- Sidebar: **Recent** list (last opened repos, up to 8).
+- First-run repository root onboarding: **Skip for now** (stored separately from choosing a folder).
+
+### Changed
+- Hub: clearer batch results (including partial success: summary info banner + failure details); opening clone, scan, ZIP import, sync heads, refresh, or remote updates clears the app shell top notice to avoid stacked messages.
+- Help opens to the remote-update anchor when launched from Hub links.
+
 ## [1.1.6] - 2026-04-03
 
 ### Fixed

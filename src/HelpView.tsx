@@ -1,9 +1,21 @@
+import { useEffect } from "react";
+
 type Props = {
   locale?: "zh-CN" | "en-US";
 };
 
 export function HelpView({ locale = "zh-CN" }: Props) {
   const isZh = locale === "zh-CN";
+
+  useEffect(() => {
+    if (window.location.hash !== "#help-remote-update") return;
+    requestAnimationFrame(() => {
+      document
+        .getElementById("help-remote-update")
+        ?.scrollIntoView({ behavior: "smooth", block: "start" });
+    });
+  }, []);
+
   return (
     <div className="help-view help-redesign">
       <header className="help-hero">
@@ -43,6 +55,49 @@ export function HelpView({ locale = "zh-CN" }: Props) {
             </p>
           </li>
         </ol>
+      </section>
+
+      <section className="help-card" id="help-remote-update">
+        <h3>{isZh ? "从远程更新仓库" : "Update repositories from remote"}</h3>
+        <p className="help-lead help-inline-lead">
+          {isZh
+            ? "与「同步全部 HEAD」不同：下列操作会连接网络，从名为 origin 的远程执行 git fetch，并把当前分支硬重置到刚拉取到的状态（与门户里「覆盖更新」一致），不是合并（merge）。"
+            : "Unlike \"Sync All HEADs\", the actions below use the network: they git fetch from the remote named origin and hard-reset your current branch to match what was just fetched (same as Hub \"overwrite update\"), not a merge."}
+        </p>
+        <ul className="help-steps">
+          <li>
+            <strong>{isZh ? "单个仓库" : "One repository"}</strong>
+            <p>
+              {isZh
+                ? "在门户列表卡片上点击「拉取更新」（多选模式下会暂时隐藏），确认后执行。若有未提交的已跟踪改动，会先尝试 stash。"
+                : "On the Hub list card, click \"Pull\" (hidden while multi-select mode is on), then confirm. Uncommitted tracked changes are stashed first when needed."}
+            </p>
+          </li>
+          <li>
+            <strong>{isZh ? "全部仓库" : "All registered repos"}</strong>
+            <p>
+              {isZh
+                ? "点击工具栏「⋯」→「从远程更新全部…」，将对库内登记的每个仓库依次执行；本地路径已不存在的会跳过。"
+                : "Click \"⋯\" → \"Update all from remote…\" to run the update for every registered repository in order; missing local paths are skipped."}
+            </p>
+          </li>
+          <li>
+            <strong>{isZh ? "多选批量" : "Multi-select batch"}</strong>
+            <p>
+              {isZh
+                ? "点击「⋯」→「多选更新…」，勾选当前列表中的仓库，再点「更新选中」；可用「全选当前列表 / 清除选择」。筛选或「只看收藏」变化后，已隐藏的选中项会自动取消勾选。"
+                : "Click \"⋯\" → \"Multi-select to update…\", check repos in the current list, then \"Update selected\". Use \"Select visible\" / \"Clear selection\". Changing search or \"Favorites only\" drops selections that are no longer visible."}
+            </p>
+          </li>
+          <li>
+            <strong>{isZh ? "同步全部 HEAD 是什么？" : "What is \"Sync All HEADs\"?"}</strong>
+            <p>
+              {isZh
+                ? "「⋯」→「同步全部 HEAD」只在本机重读每个仓库当前的 HEAD 提交并更新门户里的缓存显示，不会访问远程，也不会改变工作区文件。"
+                : "\"⋯\" → \"Sync All HEADs\" only re-reads each repo's local HEAD and refreshes cached display in the Hub. It does not use the network or change working tree files."}
+            </p>
+          </li>
+        </ul>
       </section>
 
       <section className="help-card">

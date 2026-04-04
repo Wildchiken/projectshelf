@@ -16,6 +16,8 @@ import {
   hubListRepos,
   hubOverwriteFetchResetAuto,
   hubPruneMissingRepos,
+  hubPullFromRemoteAutoAll,
+  hubPullFromRemoteAutoMany,
   hubScanDirectory,
   hubSearch,
   hubSetFavorite,
@@ -25,6 +27,9 @@ import {
   repoWarmTreeCache,
   onCloneDone,
   onCloneProgress,
+  onHubPullProgress,
+  type HubPullBatchSummary,
+  type HubPullProgressPayload,
 } from "./api";
 
 type Props = {
@@ -33,9 +38,52 @@ type Props = {
   layoutMode: "comfortable" | "compact";
   repoRoot: string;
   refreshToken?: number;
+  onClearGlobalNotice?: () => void;
+  onOpenRemoteHelp?: () => void;
 };
 
 type SortMode = "favorite_first" | "recent_first" | "name_asc" | "created_desc";
+
+type PullConfirmState =
+  | { kind: "single"; repo: RepoRecord }
+  | { kind: "all"; total: number }
+  | { kind: "selected"; ids: number[] };
+
+function formatHubPullProgressLine(
+  isZh: boolean,
+  p: Extract<HubPullProgressPayload, { phase: "item" }>,
+): string {
+  const st =
+    p.status === "ok"
+      ? isZh
+        ? "成功"
+        : "ok"
+      : p.status === "failed"
+        ? isZh
+          ? "失败"
+          : "failed"
+        : isZh
+          ? "已跳过"
+          : "skipped";
+  const err =
+    p.status === "failed" && p.error
+      ? `${isZh ? " — " : " — "}${String(p.error)}`
+      : "";
+  return isZh
+    ? `进度 ${p.index}/${p.total}：${p.displayHint}（${st}）${err}`
+    : `${p.index}/${p.total} · ${p.displayHint} (${st})${err}`;
+}
+
+function formatBatchFailuresOnly(
+  s: HubPullBatchSummary,
+  moreFn: (n: number) => string,
+): string {
+  if (s.failures.length === 0) return "";
+  const show = s.failures.slice(0, 8);
+  let text = show.map((f) => `${f.displayHint}: ${f.error}`).join("\n");
+  if (s.failures.length > 8) text += moreFn(s.failures.length - 8);
+  return text;
+}
 
 export function HubView({
   onOpenRepo,
@@ -43,6 +91,8 @@ export function HubView({
   layoutMode,
   repoRoot,
   refreshToken,
+  onClearGlobalNotice,
+  onOpenRemoteHelp,
 }: Props) {
   const APP_REPO_ROOT_KEY = "deskvio-repo-root";
   function getEffectiveRepoRoot() {
@@ -69,10 +119,37 @@ export function HubView({
       }
     };
   }, []);
+
+  const scheduleNoticeClear = useCallback((ms: number) => {
+    if (noticeTimeoutRef.current) clearTimeout(noticeTimeoutRef.current);
+    noticeTimeoutRef.current = setTimeout(() => setNotice(null), ms);
+  }, []);
+
   const [moreOpen, setMoreOpen] = useState(false);
   const [sortMode, setSortMode] = useState<SortMode>("created_desc");
   const [favoritesOnly, setFavoritesOnly] = useState(false);
+  const [selectionMode, setSelectionMode] = useState(false);
+  const [selectedIds, setSelectedIds] = useState<Set<number>>(() => new Set());
+  const exitSelectionMode = useCallback(() => {
+    setSelectionMode(false);
+    setSelectedIds(new Set());
+  }, []);
+  const [pullConfirm, setPullConfirm] = useState<PullConfirmState | null>(null);
+  const dismissPullConfirm = useCallback(() => setPullConfirm(null), []);
+  const [pullBatchSubline, setPullBatchSubline] = useState<string | null>(null);
   const [cloneOpen, setCloneOpen] = useState(false);
+
+  const touchHubPrimary = useCallback(() => {
+    onClearGlobalNotice?.();
+  }, [onClearGlobalNotice]);
+
+  useEffect(() => {
+    if (!pullConfirm) return;
+    const id = requestAnimationFrame(() => {
+      document.getElementById("hub-pull-confirm-cancel")?.focus();
+    });
+    return () => cancelAnimationFrame(id);
+  }, [pullConfirm]);
   const [cloneUrl, setCloneUrl] = useState("");
   const [, setCloneSessionId] = useState<string | null>(null);
   const cloneSessionIdRef = useRef<string | null>(null);
@@ -92,6 +169,25 @@ export function HubView({
   const lastScannedRepoRootRef = useRef<string>(getEffectiveRepoRoot());
   const [effectiveColumns, setEffectiveColumns] = useState<number>(1);
   const isZh = locale === "zh-CN";
+  const isZhRef = useRef(isZh);
+  isZhRef.current = isZh;
+
+  useEffect(() => {
+    let unlisten: (() => void) | undefined;
+    void onHubPullProgress((p) => {
+      if (p.phase === "start") {
+        setPullBatchSubline(null);
+        return;
+      }
+      setPullBatchSubline(formatHubPullProgressLine(isZhRef.current, p));
+    }).then((fn) => {
+      unlisten = fn;
+    });
+    return () => {
+      unlisten?.();
+    };
+  }, []);
+
   const sortOptions = isZh
     ? [
         { value: "favorite_first" as const, label: "收藏优先" },
@@ -116,6 +212,40 @@ export function HubView({
         noCommit: "无提交",
         tagsCount: (n: number) => `标签 ${n}`,
         noTags: "无标签",
+        pullRemote: "拉取更新",
+        pullConfirmSingle:
+          "将从 origin 获取并硬重置到 FETCH_HEAD（与刚拉取到的远程状态一致）。若有未提交的已跟踪改动，会先执行 stash。确定继续？",
+        pullConfirmAll: (n: number) =>
+          `将对库内登记的全部 ${n} 个仓库依次执行上述更新（本地路径不存在的会跳过）。确定继续？`,
+        pullConfirmSelected: (n: number) =>
+          `将对当前列表中选中的 ${n} 个仓库依次执行上述更新。确定继续？`,
+        pullAllMenu: "从远程更新全部…",
+        selectModeEnter: "多选更新…",
+        selectModeExit: "退出多选",
+        pullSelected: (n: number) => `更新选中 (${n})`,
+        pullNoSelection: "请先在列表中勾选仓库。",
+        pullNothingToUpdate: "没有可更新的选中项（可能已被筛选隐藏）。",
+        batchSummary: (s: HubPullBatchSummary) =>
+          `远程更新完成：成功 ${s.succeeded}，失败 ${s.failed}，路径缺失跳过 ${s.skippedMissing}（共 ${s.total} 条）`,
+        batchMoreFailures: (n: number) => `\n…还有 ${n} 个失败项`,
+        pullOkStashed:
+          "已更新（已暂存本地改动；需要时可用 git stash pop 恢复）",
+        pullOk: "已更新",
+        pullFailed: "更新失败",
+        pullDirtyHint: "检测到本地已跟踪的未提交更改；自动暂存失败或需手动处理。",
+        pullConfirmTitle: "确认远程更新",
+        pullConfirmProceed: "继续更新",
+        pullConfirmCancel: "取消",
+        selectAllVisible: "全选当前列表",
+        clearSelection: "清除选择",
+        pullBatchRunning: "正在从远程更新仓库，请稍候…",
+        batchPartialSummary: (ok: number, fail: number, skipped: number) =>
+          `远程更新结束：成功 ${ok}，失败 ${fail}，路径缺失跳过 ${skipped}。失败详情见下方红色区域。`,
+        openHelpLinkShort: "查看帮助：从远程更新",
+        hubOnboardingRemoteHint:
+          "已克隆的仓库可在卡片上「拉取更新」，或通过 ⋯ 菜单「从远程更新全部 / 多选更新」批量同步（详见帮助）。",
+        clonePanelRemoteHint:
+          "已存在的同名远程可在 ⋯ 中批量更新；详见帮助「从远程更新」。",
       }
     : {
         moreActions: "More actions",
@@ -127,6 +257,41 @@ export function HubView({
         noCommit: "No commits",
         tagsCount: (n: number) => `${n} tags`,
         noTags: "No tags",
+        pullRemote: "Pull",
+        pullConfirmSingle:
+          "Fetch from origin and hard-reset to FETCH_HEAD (match the fetched remote state). Uncommitted tracked changes will be stashed first. Continue?",
+        pullConfirmAll: (n: number) =>
+          `Run this update for all ${n} registered repositories in order (missing local paths are skipped). Continue?`,
+        pullConfirmSelected: (n: number) =>
+          `Run this update for the ${n} selected repositories in the current list. Continue?`,
+        pullAllMenu: "Update all from remote…",
+        selectModeEnter: "Multi-select to update…",
+        selectModeExit: "Exit multi-select",
+        pullSelected: (n: number) => `Update selected (${n})`,
+        pullNoSelection: "Select one or more repositories first.",
+        pullNothingToUpdate: "No selected repositories in the current list.",
+        batchSummary: (s: HubPullBatchSummary) =>
+          `Remote update: ${s.succeeded} ok, ${s.failed} failed, ${s.skippedMissing} missing path (${s.total} total)`,
+        batchMoreFailures: (n: number) => `\n…${n} more failures`,
+        pullOkStashed:
+          "Updated (stashed local changes; use git stash pop to restore)",
+        pullOk: "Updated",
+        pullFailed: "Update failed",
+        pullDirtyHint:
+          "Uncommitted tracked changes detected; stash failed or needs manual fix.",
+        pullConfirmTitle: "Confirm remote update",
+        pullConfirmProceed: "Update",
+        pullConfirmCancel: "Cancel",
+        selectAllVisible: "Select visible",
+        clearSelection: "Clear selection",
+        pullBatchRunning: "Updating repositories from remote…",
+        batchPartialSummary: (ok: number, fail: number, skipped: number) =>
+          `Remote update finished: ${ok} ok, ${fail} failed, ${skipped} missing path. See the red area below for errors.`,
+        openHelpLinkShort: "Help: update from remote",
+        hubOnboardingRemoteHint:
+          "For cloned repos use \"Pull\" on each card, or \"⋯\" → \"Update all from remote\" / multi-select batch (see Help).",
+        clonePanelRemoteHint:
+          "Batch updates for existing remotes are under \"⋯\"; see Help → \"Update from remote\".",
       };
 
   const displayedRepos = useMemo(() => {
@@ -156,6 +321,21 @@ export function HubView({
     });
     return withIndex.map((item) => item.repo);
   }, [repos, favoritesOnly, sortMode]);
+
+  const selectedInViewCount = useMemo(
+    () => displayedRepos.filter((r) => selectedIds.has(r.id)).length,
+    [displayedRepos, selectedIds],
+  );
+
+  useEffect(() => {
+    if (!selectionMode) return;
+    const visible = new Set(displayedRepos.map((r) => r.id));
+    setSelectedIds((prev) => {
+      const next = new Set([...prev].filter((id) => visible.has(id)));
+      if (next.size === prev.size) return prev;
+      return next;
+    });
+  }, [displayedRepos, selectionMode]);
 
   useEffect(() => {
     if (!moreOpen) return;
@@ -344,6 +524,7 @@ export function HubView({
   }, [layoutMode]);
 
   async function pickAddRepo() {
+    touchHubPrimary();
     setError(null);
     const dir = await open({
       directory: true,
@@ -363,6 +544,7 @@ export function HubView({
   }
 
   async function pickScan() {
+    touchHubPrimary();
     setError(null);
     const dir = await open({
       directory: true,
@@ -382,6 +564,7 @@ export function HubView({
   }
 
   async function syncHeads() {
+    touchHubPrimary();
     setError(null);
     setNotice(null);
     setBusy(true);
@@ -399,6 +582,7 @@ export function HubView({
   }
 
   async function pickZip() {
+    touchHubPrimary();
     setError(null);
     const file = await open({
       multiple: false,
@@ -429,6 +613,7 @@ export function HubView({
   }
 
   async function startCloneStream(url: string, destParent: string) {
+    touchHubPrimary();
     cloneCancelRequestedRef.current = false;
     setBusy(true);
     try {
@@ -450,6 +635,7 @@ export function HubView({
   async function submitCloneRepo() {
     const url = cloneUrl.trim();
     if (!url) return;
+    touchHubPrimary();
     setError(null);
     setCloneLog([]);
     setCloneResult(null);
@@ -550,6 +736,14 @@ export function HubView({
         else closeClonePanel();
         return;
       }
+      if (pullConfirm) {
+        if (!busy) dismissPullConfirm();
+        return;
+      }
+      if (selectionMode) {
+        exitSelectionMode();
+        return;
+      }
       if (moreOpen) setMoreOpen(false);
     };
     document.addEventListener("keydown", onKey);
@@ -560,9 +754,13 @@ export function HubView({
     cloneOpen,
     busy,
     moreOpen,
+    selectionMode,
+    pullConfirm,
     closeClonePanel,
     dismissConflict,
+    dismissPullConfirm,
     cancelClone,
+    exitSelectionMode,
   ]);
 
   async function toggleFavorite(r: RepoRecord) {
@@ -580,6 +778,134 @@ export function HubView({
     } catch {
     }
     onOpenRepo(r);
+  }
+
+  function formatBatchNotice(s: HubPullBatchSummary): string {
+    let text = ui.batchSummary(s);
+    if (s.failures.length > 0) {
+      const show = s.failures.slice(0, 5);
+      const lines = show.map((f) => `${f.displayHint}: ${f.error}`).join("\n");
+      text += `\n${lines}`;
+      if (s.failures.length > 5) {
+        text += ui.batchMoreFailures(s.failures.length - 5);
+      }
+    }
+    return text;
+  }
+
+  function toggleRepoSelected(id: number) {
+    setSelectedIds((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  }
+
+  function selectAllDisplayed() {
+    setSelectedIds(new Set(displayedRepos.map((r) => r.id)));
+  }
+
+  function clearDisplayedSelection() {
+    setSelectedIds(new Set());
+  }
+
+  function openPullConfirmSingle(repo: RepoRecord) {
+    setError(null);
+    setPullConfirm({ kind: "single", repo });
+  }
+
+  async function openPullConfirmAll() {
+    setError(null);
+    setNotice(null);
+    try {
+      const all = await hubListRepos();
+      if (all.length === 0) {
+        setNotice(isZh ? "暂无仓库" : "No repositories");
+        scheduleNoticeClear(6000);
+        return;
+      }
+      setPullConfirm({ kind: "all", total: all.length });
+    } catch (e) {
+      setError(String(e));
+    }
+  }
+
+  function openPullConfirmSelected() {
+    const ids = displayedRepos.filter((r) => selectedIds.has(r.id)).map((r) => r.id);
+    if (selectedIds.size === 0) {
+      setNotice(ui.pullNoSelection);
+      scheduleNoticeClear(6000);
+      return;
+    }
+    if (ids.length === 0) {
+      setNotice(ui.pullNothingToUpdate);
+      scheduleNoticeClear(6000);
+      return;
+    }
+    setError(null);
+    setPullConfirm({ kind: "selected", ids });
+  }
+
+  async function runPullConfirmed(gate: PullConfirmState) {
+    touchHubPrimary();
+    setPullConfirm(null);
+    setError(null);
+    setNotice(null);
+    setPullBatchSubline(null);
+    setBusy(true);
+    if (gate.kind !== "single") {
+      setNotice(ui.pullBatchRunning);
+    }
+    try {
+      if (gate.kind === "single") {
+        const result = await hubOverwriteFetchResetAuto(gate.repo.id);
+        if (result.ok) {
+          const msg = result.stashed ? ui.pullOkStashed : ui.pullOk;
+          setNotice(msg);
+          scheduleNoticeClear(12000);
+          await refresh();
+        } else if (result.dirty) {
+          setError(ui.pullDirtyHint);
+        } else {
+          setError(result.error ?? ui.pullFailed);
+        }
+        return;
+      }
+
+      const applyBatchResult = async (s: HubPullBatchSummary) => {
+        await refresh();
+        if (s.failed > 0 && s.succeeded > 0) {
+          setNotice(
+            ui.batchPartialSummary(s.succeeded, s.failed, s.skippedMissing),
+          );
+          setError(formatBatchFailuresOnly(s, ui.batchMoreFailures));
+          scheduleNoticeClear(25000);
+        } else if (s.failed > 0) {
+          setError(formatBatchNotice(s));
+          setNotice(null);
+        } else {
+          setNotice(formatBatchNotice(s));
+          scheduleNoticeClear(20000);
+        }
+      };
+
+      if (gate.kind === "all") {
+        const s = await hubPullFromRemoteAutoAll();
+        await applyBatchResult(s);
+        return;
+      }
+
+      const s = await hubPullFromRemoteAutoMany(gate.ids);
+      setSelectedIds(new Set());
+      await applyBatchResult(s);
+    } catch (e) {
+      setError(String(e));
+      setNotice(null);
+    } finally {
+      setPullBatchSubline(null);
+      setBusy(false);
+    }
   }
 
   return (
@@ -621,6 +947,43 @@ export function HubView({
           />
           <span>{isZh ? "只看收藏" : "Favorites only"}</span>
         </label>
+        {selectionMode && (
+          <div
+            className="hub-select-toolbar"
+            role="group"
+            aria-label={isZh ? "多选操作" : "Multi-select"}
+          >
+            <button
+              type="button"
+              className="btn-quiet hub-toolbar-mini-link"
+              onClick={selectAllDisplayed}
+              disabled={busy || displayedRepos.length === 0}
+            >
+              {ui.selectAllVisible}
+            </button>
+            <span className="hub-select-toolbar-sep" aria-hidden="true">
+              ·
+            </span>
+            <button
+              type="button"
+              className="btn-quiet hub-toolbar-mini-link"
+              onClick={clearDisplayedSelection}
+              disabled={busy || selectedInViewCount === 0}
+            >
+              {ui.clearSelection}
+            </button>
+          </div>
+        )}
+        {selectionMode && selectedInViewCount > 0 && (
+          <button
+            type="button"
+            className="btn-secondary hub-pull-selected-btn"
+            disabled={busy}
+            onClick={openPullConfirmSelected}
+          >
+            {ui.pullSelected(selectedInViewCount)}
+          </button>
+        )}
         <div className="hub-toolbar-actions" ref={moreRef}>
           <button
             type="button"
@@ -681,6 +1044,7 @@ export function HubView({
                   disabled={busy}
                   onClick={() => {
                     setMoreOpen(false);
+                    touchHubPrimary();
                     void refresh();
                   }}
                 >
@@ -697,13 +1061,42 @@ export function HubView({
                 >
                   {isZh ? "同步全部 HEAD" : "Sync All HEADs"}
                 </button>
+                <div className="hub-dropdown-sep" role="separator" />
+                <button
+                  type="button"
+                  role="menuitem"
+                  disabled={busy}
+                  onClick={() => {
+                    setMoreOpen(false);
+                    void openPullConfirmAll();
+                  }}
+                >
+                  {ui.pullAllMenu}
+                </button>
+                <button
+                  type="button"
+                  role="menuitem"
+                  disabled={busy}
+                  onClick={() => {
+                    setMoreOpen(false);
+                    if (selectionMode) exitSelectionMode();
+                    else setSelectionMode(true);
+                  }}
+                >
+                  {selectionMode ? ui.selectModeExit : ui.selectModeEnter}
+                </button>
               </div>
             )}
           </div>
         </div>
       </header>
+      {notice && <div className="info-banner">{notice}</div>}
       {error && <div className="error-banner">{error}</div>}
-      {notice && !error && <div className="info-banner">{notice}</div>}
+      {pullBatchSubline && busy && !error && (
+        <div className="info-banner hub-pull-progress-sub" role="status">
+          {pullBatchSubline}
+        </div>
+      )}
       {cloneOpen && (
         <section
           className="settings-confirm-panel hub-clone-panel hub-clone-panel-enter"
@@ -729,6 +1122,21 @@ export function HubView({
           <p className="settings-note">
             {isZh ? "落地目录：" : "Destination root: "}
               <code>{getEffectiveRepoRoot().trim() || (isZh ? "未指定" : "Not set")}</code>
+          </p>
+          <p className="settings-note hub-clone-extra">
+            {ui.clonePanelRemoteHint}{" "}
+            {onOpenRemoteHelp ? (
+              <button
+                type="button"
+                className="btn-quiet hub-inline-help-link"
+                onClick={() => {
+                  onOpenRemoteHelp();
+                  closeClonePanel();
+                }}
+              >
+                {ui.openHelpLinkShort}
+              </button>
+            ) : null}
           </p>
           {cloneLog.length > 0 && (
             <pre ref={cloneLogRef} className="hub-clone-log">{cloneLog.join("\n")}</pre>
@@ -835,11 +1243,79 @@ export function HubView({
           </section>
         </div>
       )}
+      {pullConfirm && (
+        <div
+          className="clone-conflict-overlay"
+          role="dialog"
+          aria-modal="true"
+          aria-labelledby="hub-pull-confirm-title"
+          onClick={(e) => {
+            if (e.target === e.currentTarget && !busy) dismissPullConfirm();
+          }}
+        >
+          <section
+            className="clone-conflict-panel"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <h4 id="hub-pull-confirm-title" className="clone-conflict-title">
+              {ui.pullConfirmTitle}
+            </h4>
+            <p className="clone-conflict-desc">
+              {pullConfirm.kind === "single"
+                ? ui.pullConfirmSingle
+                : pullConfirm.kind === "all"
+                  ? ui.pullConfirmAll(pullConfirm.total)
+                  : ui.pullConfirmSelected(pullConfirm.ids.length)}
+            </p>
+            {pullConfirm.kind === "single" && (
+              <>
+                <div className="clone-conflict-repo-name">
+                  {pullConfirm.repo.displayName ??
+                    pullConfirm.repo.path.split(/[/\\]/).filter(Boolean).pop()}
+                </div>
+                <code className="clone-conflict-repo-path" title={pullConfirm.repo.path}>
+                  {pullConfirm.repo.path}
+                </code>
+              </>
+            )}
+            <div className="clone-conflict-actions">
+              <button
+                type="button"
+                id="hub-pull-confirm-cancel"
+                className="btn-secondary"
+                onClick={dismissPullConfirm}
+                disabled={busy}
+              >
+                {ui.pullConfirmCancel}
+              </button>
+              <button
+                type="button"
+                className="btn-primary"
+                disabled={busy}
+                onClick={() => void runPullConfirmed(pullConfirm)}
+              >
+                {ui.pullConfirmProceed}
+              </button>
+            </div>
+          </section>
+        </div>
+      )}
       <ul className="repo-list" ref={listRef}>
         {displayedRepos.map((r) => (
           <li key={r.id} className="repo-card">
             <div className="repo-card-head">
               <div className="repo-card-main">
+                {selectionMode && (
+                  <label className="hub-repo-select-cell">
+                    <input
+                      type="checkbox"
+                      checked={selectedIds.has(r.id)}
+                      onChange={() => toggleRepoSelected(r.id)}
+                      disabled={busy}
+                      aria-label={isZh ? "选中以批量更新" : "Select for batch update"}
+                    />
+                  </label>
+                )}
                 <button
                   type="button"
                   className="star-btn"
@@ -865,6 +1341,17 @@ export function HubView({
                 >
                   {isZh ? "打开" : "Open"}
                 </button>
+                {!selectionMode && (
+                  <button
+                    type="button"
+                    className="repo-open-btn btn-secondary"
+                    title={isZh ? "从 origin 拉取并硬重置" : "Fetch origin and hard-reset"}
+                    disabled={busy}
+                    onClick={() => openPullConfirmSingle(r)}
+                  >
+                    {ui.pullRemote}
+                  </button>
+                )}
               </div>
             </div>
 
@@ -910,6 +1397,18 @@ export function HubView({
               {isZh
                 ? "选择一种方式添加你的第一个 Git 仓库："
                 : "Choose a way to add your first Git repository:"}
+            </p>
+            <p className="hub-onboarding-extra-hint settings-note">
+              {ui.hubOnboardingRemoteHint}{" "}
+              {onOpenRemoteHelp ? (
+                <button
+                  type="button"
+                  className="btn-quiet hub-inline-help-link"
+                  onClick={onOpenRemoteHelp}
+                >
+                  {ui.openHelpLinkShort}
+                </button>
+              ) : null}
             </p>
             <div className="hub-onboarding-cards">
               <button

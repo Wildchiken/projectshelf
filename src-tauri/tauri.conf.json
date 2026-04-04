@@ -1,7 +1,7 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "Deskvio",
-  "version": "1.1.6",
+  "version": "1.1.7",
   "identifier": "com.wildchiken.deskvio",
   "build": {
     "beforeDevCommand": "npm run dev",

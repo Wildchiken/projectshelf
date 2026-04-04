@@ -965,6 +965,205 @@ struct FetchResetResult {
     error: Option<String>,
 }
 
+fn repo_display_hint(repo: &RepoRecord) -> String {
+    if let Some(ref n) = repo.display_name {
+        if !n.trim().is_empty() {
+            return n.clone();
+        }
+    }
+    Path::new(&repo.path)
+        .file_name()
+        .and_then(|s| s.to_str())
+        .map(|s| s.to_string())
+        .unwrap_or_else(|| repo.path.clone())
+}
+
+fn fetch_reset_failure_message(r: &FetchResetResult) -> String {
+    if let Some(ref e) = r.error {
+        return e.clone();
+    }
+    if r.dirty {
+        return "local has uncommitted tracked changes".to_string();
+    }
+    "update failed".to_string()
+}
+
+fn hub_pull_from_origin_auto_inner(
+    git: &Path,
+    db_mutex: &Mutex<Database>,
+    repo: &RepoRecord,
+) -> FetchResetResult {
+    let path_str = repo.path.clone();
+
+    let status_out = std::process::Command::new(git)
+        .args(["-C", &path_str, "status", "--porcelain"])
+        .output()
+        .map_err(|e| e.to_string());
+
+    let status_out = match status_out {
+        Ok(o) => o,
+        Err(e) => {
+            return FetchResetResult {
+                ok: false,
+                dirty: false,
+                stashed: false,
+                error: Some(e),
+            };
+        }
+    };
+
+    if !status_out.status.success() {
+        let err = String::from_utf8_lossy(&status_out.stderr).trim().to_string();
+        return FetchResetResult {
+            ok: false,
+            dirty: false,
+            stashed: false,
+            error: Some(err),
+        };
+    }
+
+    let status_text = String::from_utf8_lossy(&status_out.stdout);
+    let mut has_tracked_uncommitted = false;
+    if !status_text.trim().is_empty() {
+        for line in status_text.lines() {
+            let t = line.trim_start();
+            if t.is_empty() {
+                continue;
+            }
+            if t.starts_with("??") {
+                continue;
+            }
+            if t.starts_with("!!") {
+                continue;
+            }
+            has_tracked_uncommitted = true;
+            break;
+        }
+    }
+
+    if has_tracked_uncommitted {
+        let ts = now_unix();
+        let stash_msg = format!("deskvio-overwrite-{}", ts);
+        let stash_out = std::process::Command::new(git)
+            .args(["-C", &path_str, "stash", "push", "-u", "-m", &stash_msg])
+            .output()
+            .map_err(|e| e.to_string());
+
+        let stash_out = match stash_out {
+            Ok(o) => o,
+            Err(e) => {
+                return FetchResetResult {
+                    ok: false,
+                    dirty: false,
+                    stashed: false,
+                    error: Some(e),
+                };
+            }
+        };
+
+        if !stash_out.status.success() {
+            let err = String::from_utf8_lossy(&stash_out.stderr).trim().to_string();
+            return FetchResetResult {
+                ok: false,
+                dirty: false,
+                stashed: false,
+                error: Some(format!("stash failed: {}", err)),
+            };
+        }
+    }
+
+    let fetch_out = std::process::Command::new(git)
+        .args(["-C", &path_str, "fetch", "origin"])
+        .output()
+        .map_err(|e| e.to_string());
+
+    let fetch_out = match fetch_out {
+        Ok(o) => o,
+        Err(e) => {
+            return FetchResetResult {
+                ok: false,
+                dirty: false,
+                stashed: false,
+                error: Some(e),
+            };
+        }
+    };
+
+    if !fetch_out.status.success() {
+        let err = String::from_utf8_lossy(&fetch_out.stderr).trim().to_string();
+        return FetchResetResult {
+            ok: false,
+            dirty: false,
+            stashed: false,
+            error: Some(format!("fetch failed: {}", err)),
+        };
+    }
+
+    let reset_out = std::process::Command::new(git)
+        .args(["-C", &path_str, "reset", "--hard", "FETCH_HEAD"])
+        .output()
+        .map_err(|e| e.to_string());
+
+    let reset_out = match reset_out {
+        Ok(o) => o,
+        Err(e) => {
+            return FetchResetResult {
+                ok: false,
+                dirty: false,
+                stashed: false,
+                error: Some(e),
+            };
+        }
+    };
+
+    if !reset_out.status.success() {
+        let err = String::from_utf8_lossy(&reset_out.stderr).trim().to_string();
+        return FetchResetResult {
+            ok: false,
+            dirty: false,
+            stashed: false,
+            error: Some(format!("reset failed: {}", err)),
+        };
+    }
+
+    if let Ok(ctx) = load_ctx(git, &path_str) {
+        let new_head = head_sha(git, &ctx).ok();
+        if let Ok(db) = db_mutex.lock() {
+            let _ = db.insert_repo(
+                &path_str,
+                repo.display_name.clone(),
+                repo.is_bare,
+                new_head,
+            );
+        }
+    }
+
+    FetchResetResult {
+        ok: true,
+        dirty: false,
+        stashed: has_tracked_uncommitted,
+        error: None,
+    }
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct HubPullFailure {
+    id: i64,
+    display_hint: String,
+    error: String,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct HubPullBatchSummary {
+    total: usize,
+    succeeded: usize,
+    failed: usize,
+    skipped_missing: usize,
+    failures: Vec<HubPullFailure>,
+}
+
 #[tauri::command]
 fn hub_overwrite_fetch_reset(
     state: tauri::State<'_, AppState>,
@@ -1067,103 +1266,214 @@ fn hub_overwrite_fetch_reset_auto(
         .map_err(map_db_err)?
         .ok_or_else(|| "repository not found".to_string())?;
     drop(db);
+    Ok(hub_pull_from_origin_auto_inner(
+        &state.git_bin,
+        &state.db,
+        &repo,
+    ))
+}
 
-    let path_str = repo.path.clone();
+fn emit_hub_pull_progress(app: &tauri::AppHandle, payload: serde_json::Value) {
+    let _ = app.emit("hub-pull-progress", payload);
+}
 
-    let status_out = std::process::Command::new(&state.git_bin)
-        .args(["-C", &path_str, "status", "--porcelain"])
-        .output()
-        .map_err(|e| e.to_string())?;
+#[tauri::command]
+fn hub_pull_from_remote_auto_many(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, AppState>,
+    ids: Vec<i64>,
+) -> Result<HubPullBatchSummary, String> {
+    let total = ids.len();
+    let mut succeeded = 0usize;
+    let mut failed = 0usize;
+    let mut skipped_missing = 0usize;
+    let mut failures: Vec<HubPullFailure> = Vec::new();
 
-    if !status_out.status.success() {
-        let err = String::from_utf8_lossy(&status_out.stderr).trim().to_string();
-        return Ok(FetchResetResult {
-            ok: false,
-            dirty: false,
-            stashed: false,
-            error: Some(err),
-        });
-    }
+    emit_hub_pull_progress(
+        &app,
+        serde_json::json!({
+            "phase": "start",
+            "total": total,
+        }),
+    );
 
-    let status_text = String::from_utf8_lossy(&status_out.stdout);
-    let mut has_tracked_uncommitted = false;
-    if !status_text.trim().is_empty() {
-        for line in status_text.lines() {
-            let t = line.trim_start();
-            if t.is_empty() {
-                continue;
-            }
-            if t.starts_with("??") {
-                continue;
-            }
-            if t.starts_with("!!") {
-                continue;
-            }
-            has_tracked_uncommitted = true;
-            break;
-        }
-    }
-
-    if has_tracked_uncommitted {
-        let ts = now_unix();
-        let stash_msg = format!("deskvio-overwrite-{}", ts);
-        let stash_out = std::process::Command::new(&state.git_bin)
-            .args(["-C", &path_str, "stash", "push", "-u", "-m", &stash_msg])
-            .output()
-            .map_err(|e| e.to_string())?;
-        if !stash_out.status.success() {
-            let err = String::from_utf8_lossy(&stash_out.stderr).trim().to_string();
-            return Ok(FetchResetResult {
-                ok: false,
-                dirty: false,
-                stashed: false,
-                error: Some(format!("stash failed: {}", err)),
+    for (i, id) in ids.iter().enumerate() {
+        let index = i + 1;
+        let repo = {
+            let db = state.db.lock().map_err(|e| e.to_string())?;
+            db.get(*id).map_err(map_db_err)?
+        };
+        let Some(repo) = repo else {
+            failed += 1;
+            failures.push(HubPullFailure {
+                id: *id,
+                display_hint: format!("id {}", id),
+                error: "repository not found".to_string(),
             });
+            emit_hub_pull_progress(
+                &app,
+                serde_json::json!({
+                    "phase": "item",
+                    "index": index,
+                    "total": total,
+                    "id": id,
+                    "displayHint": format!("id {}", id),
+                    "status": "failed",
+                    "error": "repository not found",
+                }),
+            );
+            continue;
+        };
+        let hint = repo_display_hint(&repo);
+        if !PathBuf::from(&repo.path).exists() {
+            skipped_missing += 1;
+            emit_hub_pull_progress(
+                &app,
+                serde_json::json!({
+                    "phase": "item",
+                    "index": index,
+                    "total": total,
+                    "id": repo.id,
+                    "displayHint": hint,
+                    "status": "skipped",
+                    "error": serde_json::Value::Null,
+                }),
+            );
+            continue;
+        }
+        let result = hub_pull_from_origin_auto_inner(&state.git_bin, &state.db, &repo);
+        if result.ok {
+            succeeded += 1;
+            emit_hub_pull_progress(
+                &app,
+                serde_json::json!({
+                    "phase": "item",
+                    "index": index,
+                    "total": total,
+                    "id": repo.id,
+                    "displayHint": hint,
+                    "status": "ok",
+                    "error": serde_json::Value::Null,
+                }),
+            );
+        } else {
+            failed += 1;
+            let err_msg = fetch_reset_failure_message(&result);
+            failures.push(HubPullFailure {
+                id: repo.id,
+                display_hint: hint.clone(),
+                error: err_msg.clone(),
+            });
+            emit_hub_pull_progress(
+                &app,
+                serde_json::json!({
+                    "phase": "item",
+                    "index": index,
+                    "total": total,
+                    "id": repo.id,
+                    "displayHint": hint,
+                    "status": "failed",
+                    "error": err_msg,
+                }),
+            );
         }
     }
 
-    let fetch_out = std::process::Command::new(&state.git_bin)
-        .args(["-C", &path_str, "fetch", "origin"])
-        .output()
-        .map_err(|e| e.to_string())?;
+    Ok(HubPullBatchSummary {
+        total,
+        succeeded,
+        failed,
+        skipped_missing,
+        failures,
+    })
+}
 
-    if !fetch_out.status.success() {
-        let err = String::from_utf8_lossy(&fetch_out.stderr).trim().to_string();
-        return Ok(FetchResetResult {
-            ok: false,
-            dirty: false,
-            stashed: false,
-            error: Some(format!("fetch failed: {}", err)),
-        });
-    }
+#[tauri::command]
+fn hub_pull_from_remote_auto_all(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, AppState>,
+) -> Result<HubPullBatchSummary, String> {
+    let repos: Vec<RepoRecord> = {
+        let db = state.db.lock().map_err(|e| e.to_string())?;
+        db.list_all().map_err(map_db_err)?
+    };
+    let total = repos.len();
+    let mut succeeded = 0usize;
+    let mut failed = 0usize;
+    let mut skipped_missing = 0usize;
+    let mut failures: Vec<HubPullFailure> = Vec::new();
 
-    let reset_out = std::process::Command::new(&state.git_bin)
-        .args(["-C", &path_str, "reset", "--hard", "FETCH_HEAD"])
-        .output()
-        .map_err(|e| e.to_string())?;
+    emit_hub_pull_progress(
+        &app,
+        serde_json::json!({
+            "phase": "start",
+            "total": total,
+        }),
+    );
 
-    if !reset_out.status.success() {
-        let err = String::from_utf8_lossy(&reset_out.stderr).trim().to_string();
-        return Ok(FetchResetResult {
-            ok: false,
-            dirty: false,
-            stashed: false,
-            error: Some(format!("reset failed: {}", err)),
-        });
-    }
-
-    if let Ok(ctx) = load_ctx(&state.git_bin, &path_str) {
-        let new_head = head_sha(&state.git_bin, &ctx).ok();
-        if let Ok(db) = state.db.lock() {
-            let _ = db.insert_repo(&path_str, repo.display_name, repo.is_bare, new_head);
+    for (i, repo) in repos.iter().enumerate() {
+        let index = i + 1;
+        let hint = repo_display_hint(repo);
+        if !PathBuf::from(&repo.path).exists() {
+            skipped_missing += 1;
+            emit_hub_pull_progress(
+                &app,
+                serde_json::json!({
+                    "phase": "item",
+                    "index": index,
+                    "total": total,
+                    "id": repo.id,
+                    "displayHint": hint,
+                    "status": "skipped",
+                    "error": serde_json::Value::Null,
+                }),
+            );
+            continue;
+        }
+        let result = hub_pull_from_origin_auto_inner(&state.git_bin, &state.db, repo);
+        if result.ok {
+            succeeded += 1;
+            emit_hub_pull_progress(
+                &app,
+                serde_json::json!({
+                    "phase": "item",
+                    "index": index,
+                    "total": total,
+                    "id": repo.id,
+                    "displayHint": hint,
+                    "status": "ok",
+                    "error": serde_json::Value::Null,
+                }),
+            );
+        } else {
+            failed += 1;
+            let err_msg = fetch_reset_failure_message(&result);
+            failures.push(HubPullFailure {
+                id: repo.id,
+                display_hint: hint.clone(),
+                error: err_msg.clone(),
+            });
+            emit_hub_pull_progress(
+                &app,
+                serde_json::json!({
+                    "phase": "item",
+                    "index": index,
+                    "total": total,
+                    "id": repo.id,
+                    "displayHint": hint,
+                    "status": "failed",
+                    "error": err_msg,
+                }),
+            );
         }
     }
 
-    Ok(FetchResetResult {
-        ok: true,
-        dirty: false,
-        stashed: has_tracked_uncommitted,
-        error: None,
+    Ok(HubPullBatchSummary {
+        total,
+        succeeded,
+        failed,
+        skipped_missing,
+        failures,
     })
 }
 
@@ -2145,6 +2455,8 @@ pub fn run() {
             hub_check_clone_conflict,
             hub_overwrite_fetch_reset,
             hub_overwrite_fetch_reset_auto,
+            hub_pull_from_remote_auto_many,
+            hub_pull_from_remote_auto_all,
             hub_remove_repo,
             hub_unlink_repo,
             hub_scan_directory,

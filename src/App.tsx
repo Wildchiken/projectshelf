@@ -3,6 +3,7 @@ import { open } from "@tauri-apps/plugin-dialog";
 import {
   hubListRepos,
   hubRemoveRepo,
+  hubTouchRepo,
   hubUnlinkRepo,
   appDbStatus,
   type RepoRecord,
@@ -98,6 +99,7 @@ function App() {
   const noticeTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const [resetProgress, setResetProgress] = useState<ResetProgress | null>(null);
   const [resetSummary, setResetSummary] = useState<ResetProgress | null>(null);
+  const [recentRepos, setRecentRepos] = useState<RepoRecord[]>([]);
 
   useLayoutEffect(() => {
     document.documentElement.dataset.theme = theme;
@@ -127,8 +129,12 @@ function App() {
 
   useLayoutEffect(() => {
     const savedRoot = readStoredRepoRoot().trim();
-    const onboarded = localStorage.getItem(APP_REPO_ROOT_ONBOARDING_KEY) === "done";
-    if (!onboarded && savedRoot.length === 0) setShowRepoRootOnboarding(true);
+    const flag = localStorage.getItem(APP_REPO_ROOT_ONBOARDING_KEY);
+    const dismissed =
+      flag === "done" ||
+      flag === "skipped" ||
+      savedRoot.length > 0;
+    if (!dismissed) setShowRepoRootOnboarding(true);
   }, []);
 
   const isZh = locale === "zh-CN";
@@ -192,11 +198,36 @@ function App() {
     ? {
         title: "指定仓库根目录",
         desc: "你需要先选择一个可见目录。之后克隆与 ZIP 导入会落在这里。",
+        skipLater: "稍后",
       }
     : {
         title: "Choose repository root",
         desc: "Select a visible directory first. Future clones and ZIP imports will land here.",
+        skipLater: "Skip for now",
       };
+
+  useLayoutEffect(() => {
+    let cancelled = false;
+    void (async () => {
+      try {
+        const list = await hubListRepos();
+        if (cancelled) return;
+        const recent = [...list]
+          .filter((r) => r.lastOpenedAt != null)
+          .sort(
+            (a, b) =>
+              (b.lastOpenedAt ?? 0) - (a.lastOpenedAt ?? 0),
+          )
+          .slice(0, 8);
+        setRecentRepos(recent);
+      } catch {
+        if (!cancelled) setRecentRepos([]);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [hubRefreshToken, activeRepo]);
 
   async function pickRepoRoot(): Promise<string | null> {
     const dir = await open({ directory: true, multiple: false });
@@ -211,6 +242,27 @@ function App() {
     setRepoRoot(nextRoot);
     localStorage.setItem(APP_REPO_ROOT_ONBOARDING_KEY, "done");
     setShowRepoRootOnboarding(false);
+  }
+
+  function skipRepoRootOnboarding() {
+    localStorage.setItem(APP_REPO_ROOT_ONBOARDING_KEY, "skipped");
+    setShowRepoRootOnboarding(false);
+  }
+
+  function openRemoteHelpSection() {
+    window.location.hash = "help-remote-update";
+    setActiveRepo(null);
+    setScreen("help");
+  }
+
+  async function openRecentRepo(r: RepoRecord) {
+    try {
+      await hubTouchRepo(r.id);
+    } catch {
+    }
+    setHubRefreshToken((n) => n + 1);
+    setActiveRepo(r);
+    setScreen("repo");
   }
 
   async function runHubReset(mode: ResetMode) {
@@ -357,6 +409,33 @@ function App() {
             <span className="sidebar-nav-label">{labels.help}</span>
           </button>
         </nav>
+        {recentRepos.length > 0 && (
+          <div className="sidebar-recent" aria-label={isZh ? "最近打开" : "Recently opened"}>
+            <div className="sidebar-recent-label">
+              {isZh ? "最近打开" : "Recent"}
+            </div>
+            <ul className="sidebar-recent-list">
+              {recentRepos.map((r) => {
+                const label =
+                  r.displayName?.trim() ||
+                  r.path.split(/[/\\]/).filter(Boolean).pop() ||
+                  r.path;
+                return (
+                  <li key={r.id}>
+                    <button
+                      type="button"
+                      className="sidebar-recent-btn"
+                      title={r.path}
+                      onClick={() => void openRecentRepo(r)}
+                    >
+                      <span className="sidebar-recent-btn-text">{label}</span>
+                    </button>
+                  </li>
+                );
+              })}
+            </ul>
+          </div>
+        )}
         <div className="sidebar-footer">
           <button
             type="button"
@@ -384,6 +463,8 @@ function App() {
               layoutMode={hubLayoutMode}
               repoRoot={repoRoot}
               refreshToken={hubRefreshToken}
+              onClearGlobalNotice={() => setNotice(null)}
+              onOpenRemoteHelp={openRemoteHelpSection}
               onOpenRepo={(r) => {
                 setActiveRepo(r);
                 setScreen("repo");
@@ -447,6 +528,13 @@ function App() {
             <section className="settings-card">
               <p className="settings-note">{onboardingLabels.desc}</p>
               <div className="settings-confirm-actions">
+                <button
+                  type="button"
+                  className="btn-secondary"
+                  onClick={skipRepoRootOnboarding}
+                >
+                  {onboardingLabels.skipLater}
+                </button>
                 <button
                   type="button"
                   className="btn-primary"
